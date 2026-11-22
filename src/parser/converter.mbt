@@ -313,6 +313,18 @@ fn find_markup_child(node : SpannedNode) -> SpannedNode? {
 }
 
 ///|
+fn extract_bool_literal(node : SpannedNode) -> Bool? {
+  if !(node.node.kind() is Bool) {
+    return None
+  }
+  match node.node.leaf_text() {
+    "true" => Some(true)
+    "false" => Some(false)
+    _ => None
+  }
+}
+
+///|
 fn is_block_func_name(name : String) -> Bool {
   match name {
     "heading"
@@ -326,8 +338,34 @@ fn is_block_func_name(name : String) -> Bool {
     | "rect"
     | "grid"
     | "columns"
+    | "stack"
+    | "place"
     | "pagebreak"
     | "parbreak" => true
+    _ => false
+  }
+}
+
+///|
+fn is_inline_only_func_name(name : String) -> Bool {
+  match name {
+    "strong"
+    | "emph"
+    | "strike"
+    | "underline"
+    | "overline"
+    | "highlight"
+    | "smallcaps"
+    | "sub"
+    | "super"
+    | "link"
+    | "image"
+    | "text"
+    | "footnote"
+    | "cite"
+    | "ref"
+    | "h"
+    | "box" => true
     _ => false
   }
 }
@@ -341,6 +379,58 @@ fn is_stmt_expr_kind(kind : @syntax.SyntaxKind) -> Bool {
   | ModuleImport
   | ModuleInclude
   | CodeBlock)
+}
+
+///|
+fn is_control_expr_kind(kind : @syntax.SyntaxKind) -> Bool {
+  kind is (Conditional | ForLoop | WhileLoop | Contextual)
+}
+
+///|
+fn has_content_block_recursive(node : SpannedNode) -> Bool {
+  if node.node.kind() is ContentBlock {
+    return true
+  }
+  for child in node.children {
+    if has_content_block_recursive(child) {
+      return true
+    }
+  }
+  false
+}
+
+///|
+fn is_raw_func_block(func_call : SpannedNode) -> Bool {
+  match find_func_args(func_call) {
+    Some(args) =>
+      match extract_named_arg(args, "block") {
+        Some(b) => extract_bool_literal(b).unwrap_or(false)
+        None => false
+      }
+    None => false
+  }
+}
+
+///|
+fn is_followed_by_same_line_inline(
+  items : Array[MarkupItem],
+  idx : Int32,
+) -> Bool {
+  let len = items.length()
+  let mut j = idx + 1
+  while j < len {
+    match items[j] {
+      Single(n) =>
+        match n.node.kind() {
+          SpaceNoNewline => j += 1
+          SpaceWithNewline | Parbreak | LineComment | BlockComment =>
+            return false
+          _ => return true
+        }
+      Hashed(..) => return true
+    }
+  }
+  false
 }
 
 ///|
@@ -457,13 +547,45 @@ fn Converter::convert_markup_blocks(
             None => ()
           }
           i += 1
+        } else if is_control_expr_kind(ek) &&
+          is_only_whitespace_items(inline_buf) &&
+          !is_followed_by_same_line_inline(items, i) {
+          inline_buf.clear()
+          if has_content_block_recursive(expr) {
+            self.extract_blocks_from_expr(expr, blocks)
+          } else {
+            let value = self.slice(hash.start, end)
+            blocks.push(
+              self.make_node(
+                CodeBlock(value~, lang=Some("typst")),
+                hash.start,
+                end,
+              ),
+            )
+          }
+          i += 1
         } else if ek is FuncCall && is_only_whitespace_items(inline_buf) {
           match extract_func_callee_name(expr) {
+            Some("raw") if is_raw_func_block(expr) => {
+              inline_buf.clear()
+              for
+                b in self.convert_block_func_call("raw", expr, hash.start, end) {
+                blocks.push(b)
+              }
+              i += 1
+            }
             Some(name) if is_block_func_name(name) => {
               inline_buf.clear()
               for b in self.convert_block_func_call(name, expr, hash.start, end) {
                 blocks.push(b)
               }
+              i += 1
+            }
+            Some(name) if !is_inline_only_func_name(name) &&
+              !is_followed_by_same_line_inline(items, i) &&
+              has_content_block_recursive(expr) => {
+              inline_buf.clear()
+              self.extract_blocks_from_expr(expr, blocks)
               i += 1
             }
             _ => {
@@ -678,6 +800,27 @@ fn Converter::convert_block_func_call(
       }
       [self.make_node(BlockQuote(body_blocks), start, end)]
     }
+    "raw" => {
+      let mut value = ""
+      let mut lang : String? = None
+      match find_func_args(func_call) {
+        Some(args) => {
+          let pos = extract_positional_args(args)
+          if !pos.is_empty() {
+            match extract_str_literal(pos[0]) {
+              Some(s) => value = s
+              None => ()
+            }
+          }
+          match extract_named_arg(args, "lang") {
+            Some(lang_node) => lang = extract_str_literal(lang_node)
+            None => ()
+          }
+        }
+        None => ()
+      }
+      [self.make_node(CodeBlock(value~, lang~), start, end)]
+    }
     "table" =>
       match find_func_args(func_call) {
         Some(args) => {
@@ -697,17 +840,7 @@ fn Converter::convert_block_func_call(
             None => ()
           }
           let cells : Array[TxtNode] = []
-          for arg in extract_positional_args(args) {
-            if arg.node.kind() is ContentBlock {
-              let cell_children = match find_markup_child(arg) {
-                Some(markup) => self.convert_inline_nodes(markup.children)
-                None => []
-              }
-              cells.push(
-                self.make_node(TableCell(cell_children), arg.start, arg.end),
-              )
-            }
-          }
+          self.collect_table_cells(args, cells)
           if cells.is_empty() {
             []
           } else {
@@ -734,23 +867,104 @@ fn Converter::convert_block_func_call(
       }
     _ => {
       // Container functions (figure, block, align, pad, rect, grid, columns, etc.):
-      // Extract blocks from any ContentBlock arguments in source order.
+      // Recursively extract blocks from arguments in source order.
       let out : Array[TxtNode] = []
       match find_func_args(func_call) {
-        Some(args) =>
-          for cb in collect_content_blocks(args) {
-            match find_markup_child(cb) {
-              Some(markup) =>
-                for b in self.convert_markup_blocks(markup.children) {
-                  out.push(b)
-                }
-              None => ()
-            }
-          }
+        Some(args) => self.extract_blocks_from_expr(args, out)
         None => ()
       }
       out
     }
+  }
+}
+
+///|
+fn Converter::collect_table_cells(
+  self : Converter,
+  args : SpannedNode,
+  cells : Array[TxtNode],
+) -> Unit {
+  for arg in extract_positional_args(args) {
+    match arg.node.kind() {
+      ContentBlock => {
+        let cell_children = match find_markup_child(arg) {
+          Some(markup) => self.convert_inline_nodes(markup.children)
+          None => []
+        }
+        cells.push(self.make_node(TableCell(cell_children), arg.start, arg.end))
+      }
+      FuncCall =>
+        match extract_func_callee_name(arg) {
+          Some("table.header") | Some("table.footer") =>
+            match find_func_args(arg) {
+              Some(sub_args) => self.collect_table_cells(sub_args, cells)
+              None => ()
+            }
+          Some("table.cell") =>
+            match find_func_args(arg) {
+              Some(sub_args) =>
+                for cb in collect_content_blocks(sub_args) {
+                  let cell_children = match find_markup_child(cb) {
+                    Some(markup) => self.convert_inline_nodes(markup.children)
+                    None => []
+                  }
+                  cells.push(
+                    self.make_node(TableCell(cell_children), cb.start, cb.end),
+                  )
+                }
+              None => ()
+            }
+          _ => ()
+        }
+      _ => ()
+    }
+  }
+}
+
+///|
+/// Recursively extract block-level TxtAST nodes from arbitrary Typst expressions
+/// (ContentBlock, nested FuncCall, control flow, arrays, named args) in source order.
+fn Converter::extract_blocks_from_expr(
+  self : Converter,
+  expr : SpannedNode,
+  out : Array[TxtNode],
+) -> Unit {
+  match expr.node.kind() {
+    ContentBlock =>
+      match find_markup_child(expr) {
+        Some(markup) =>
+          for b in self.convert_markup_blocks(markup.children) {
+            out.push(b)
+          }
+        None => ()
+      }
+    FuncCall =>
+      match extract_func_callee_name(expr) {
+        Some("raw") if is_raw_func_block(expr) =>
+          for
+            b in self.convert_block_func_call("raw", expr, expr.start, expr.end) {
+            out.push(b)
+          }
+        Some(name) if is_block_func_name(name) =>
+          for
+            b in self.convert_block_func_call(name, expr, expr.start, expr.end) {
+            out.push(b)
+          }
+        Some("image") => {
+          let img = self.convert_image_func(expr, expr.start, expr.end)
+          out.push(self.make_node(Paragraph([img]), expr.start, expr.end))
+        }
+        _ =>
+          match find_func_args(expr) {
+            Some(args) => self.extract_blocks_from_expr(args, out)
+            None => ()
+          }
+      }
+    LetBinding | SetRule | ShowRule | ModuleImport | ModuleInclude => ()
+    _ =>
+      for child in expr.children {
+        self.extract_blocks_from_expr(child, out)
+      }
   }
 }
 
@@ -1031,54 +1245,120 @@ fn Converter::convert_inline_hashed(
           }
           [self.make_node(Link(url~, title=None, children~), start, end)]
         }
-        Some("image") => {
-          let mut url = ""
-          let mut alt : String? = None
+        Some("image") => [self.convert_image_func(expr, start, end)]
+        Some("raw") => {
+          let mut value = ""
           match find_func_args(expr) {
             Some(args) => {
               let pos = extract_positional_args(args)
               if !pos.is_empty() {
                 match extract_str_literal(pos[0]) {
-                  Some(s) => url = s
+                  Some(s) => value = s
                   None => ()
                 }
-              }
-              match extract_named_arg(args, "alt") {
-                Some(alt_node) => alt = extract_str_literal(alt_node)
-                None => ()
               }
             }
             None => ()
           }
-          [self.make_node(Image(url~, alt~, title=None), start, end)]
+          [self.make_node(Code(value~), start, end)]
         }
         _ =>
-          // Generic inline function call: if it has ContentBlock arguments, expose their prose;
+          // Generic inline function call: recursively expose prose inside any ContentBlock arguments;
           // otherwise treat the expression as inline Code so rules don't false-positive on Typst code.
-          match find_func_args(expr) {
-            Some(args) => {
-              let cbs = collect_content_blocks(args)
-              if cbs.is_empty() {
-                [self.make_node(Code(value=self.slice(start, end)), start, end)]
-              } else {
-                let out : Array[TxtNode] = []
-                for cb in cbs {
-                  match find_markup_child(cb) {
-                    Some(markup) =>
-                      for n in self.convert_inline_nodes(markup.children) {
-                        out.push(n)
-                      }
-                    None => ()
-                  }
-                }
-                out
-              }
+          if has_content_block_recursive(expr) {
+            let out : Array[TxtNode] = []
+            match find_func_args(expr) {
+              Some(args) => self.extract_inlines_from_expr(args, out)
+              None => ()
             }
-            None =>
-              [self.make_node(Code(value=self.slice(start, end)), start, end)]
+            out
+          } else {
+            [self.make_node(Code(value=self.slice(start, end)), start, end)]
           }
       }
+    Conditional | ForLoop | WhileLoop | Contextual =>
+      if has_content_block_recursive(expr) {
+        let out : Array[TxtNode] = []
+        self.extract_inlines_from_expr(expr, out)
+        out
+      } else {
+        [self.make_node(Code(value=self.slice(start, end)), start, end)]
+      }
     _ => [self.make_node(Code(value=self.slice(start, end)), start, end)]
+  }
+}
+
+///|
+fn Converter::convert_image_func(
+  self : Converter,
+  expr : SpannedNode,
+  start : Int32,
+  end : Int32,
+) -> TxtNode {
+  let mut url = ""
+  let mut alt : String? = None
+  match find_func_args(expr) {
+    Some(args) => {
+      let pos = extract_positional_args(args)
+      if !pos.is_empty() {
+        match extract_str_literal(pos[0]) {
+          Some(s) => url = s
+          None => ()
+        }
+      }
+      match extract_named_arg(args, "alt") {
+        Some(alt_node) => alt = extract_str_literal(alt_node)
+        None => ()
+      }
+    }
+    None => ()
+  }
+  self.make_node(Image(url~, alt~, title=None), start, end)
+}
+
+///|
+/// Recursively extract inline TxtAST nodes from expressions containing ContentBlocks in source order.
+fn Converter::extract_inlines_from_expr(
+  self : Converter,
+  expr : SpannedNode,
+  out : Array[TxtNode],
+) -> Unit {
+  match expr.node.kind() {
+    ContentBlock =>
+      match find_markup_child(expr) {
+        Some(markup) =>
+          for n in self.convert_inline_nodes(markup.children) {
+            out.push(n)
+          }
+        None => ()
+      }
+    FuncCall =>
+      match extract_func_callee_name(expr) {
+        Some("strong") => {
+          let children = self.extract_first_content_inlines(expr)
+          out.push(self.make_node(Strong(children), expr.start, expr.end))
+        }
+        Some("emph") => {
+          let children = self.extract_first_content_inlines(expr)
+          out.push(self.make_node(Emphasis(children), expr.start, expr.end))
+        }
+        Some("strike") => {
+          let children = self.extract_first_content_inlines(expr)
+          out.push(self.make_node(Delete(children), expr.start, expr.end))
+        }
+        Some("image") =>
+          out.push(self.convert_image_func(expr, expr.start, expr.end))
+        _ =>
+          match find_func_args(expr) {
+            Some(args) => self.extract_inlines_from_expr(args, out)
+            None => ()
+          }
+      }
+    LetBinding | SetRule | ShowRule | ModuleImport | ModuleInclude => ()
+    _ =>
+      for child in expr.children {
+        self.extract_inlines_from_expr(child, out)
+      }
   }
 }
 

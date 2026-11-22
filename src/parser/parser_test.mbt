@@ -107,3 +107,80 @@ test "json serialization output" {
   assert_true(json_str.contains("\"type\":\"Paragraph\""))
   assert_true(json_str.contains("\"type\":\"Str\""))
 }
+
+///|
+test "table header footer cell and nested figure table" {
+  let src =
+    #|#figure(
+    #|  table(
+    #|    columns: 2,
+    #|    table.header([H1], [H2]),
+    #|    table.cell(colspan: 2)[Body cell],
+    #|    table.footer([F1], [F2]),
+    #|  ),
+    #|  caption: [Table caption],
+    #|)
+  let doc = @textlint-plugin-typst-mbt.parse_typst_to_txt_ast(src)
+  guard doc.kind is Document(children) else { fail("expected Document") }
+  assert_eq(children.map(fn(n) { n.type_name() }), ["Table", "Paragraph"])
+  guard children[0].kind is Table(rows) else { fail("expected Table") }
+  // 5 cells (H1, H2, Body cell, F1, F2) with columns: 2 -> 3 rows (2, 2, 1)
+  assert_eq(rows.length(), 3)
+}
+
+///|
+test "control flow if for context blocks and inline" {
+  let src =
+    #|#if true [
+    #|  = Branch Heading
+    #|
+    #|  Branch body.
+    #|] else [
+    #|  Fallback body.
+    #|]
+    #|
+    #|#for x in (1, 2) [Loop item.]
+    #|
+    #|#context [Context text.]
+    #|
+    #|Inline #if ok [yes] else [no] end.
+  let doc = @textlint-plugin-typst-mbt.parse_typst_to_txt_ast(src)
+  guard doc.kind is Document(children) else { fail("expected Document") }
+  assert_eq(children.map(fn(n) { n.type_name() }), [
+    "Header", "Paragraph", "Paragraph", "Paragraph", "Paragraph", "Paragraph",
+  ])
+}
+
+///|
+test "custom block macro vs same-line inline macro" {
+  let src =
+    #|#note[
+    #|  = Note Title
+    #|
+    #|  Note body.
+    #|
+    #|  - item 1
+    #|]
+    #|
+    #|#badge[NEW] Inline text after badge.
+  let doc = @textlint-plugin-typst-mbt.parse_typst_to_txt_ast(src)
+  guard doc.kind is Document(children) else { fail("expected Document") }
+  assert_eq(children.map(fn(n) { n.type_name() }), [
+    "Header", "Paragraph", "List", "Paragraph",
+  ])
+}
+
+///|
+test "raw function form block and inline" {
+  let src =
+    #|#raw("fn main() {}", lang: "rust", block: true)
+    #|
+    #|Inline #raw("x = 1") here.
+  let doc = @textlint-plugin-typst-mbt.parse_typst_to_txt_ast(src)
+  guard doc.kind is Document(children) else { fail("expected Document") }
+  assert_eq(children.map(fn(n) { n.type_name() }), ["CodeBlock", "Paragraph"])
+  guard children[0].kind is CodeBlock(value~, lang=Some("rust")) else {
+    fail("expected rust CodeBlock")
+  }
+  assert_eq(value, "fn main() {}")
+}

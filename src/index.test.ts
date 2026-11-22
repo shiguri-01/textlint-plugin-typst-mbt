@@ -86,6 +86,66 @@ describe("parse (TxtAST conformance via @textlint/ast-tester)", () => {
       "malformed typst syntax still yields valid TxtAST",
       "= Unclosed *bold and #func(\n$ unclosed math\n```unclosed code",
     ],
+    [
+      "table.header, table.cell, table.footer inside #figure",
+      [
+        "#figure(",
+        "  table(",
+        "    columns: 2,",
+        "    table.header([項目], [説明]),",
+        "    table.hline(),",
+        "    table.cell(colspan: 2)[結合セルの文章],",
+        "    table.footer([合計], [100]),",
+        "  ),",
+        "  caption: [表のキャプション],",
+        ")",
+      ].join("\n"),
+    ],
+    [
+      "nested figure with image and grid with rect",
+      [
+        '#figure(image("chart.png", alt: "グラフ"), caption: [図の説明])',
+        "",
+        "#grid(columns: 2, rect[左カラム], rect[右カラム])",
+      ].join("\n"),
+    ],
+    [
+      "control flow (#if, #for, #context) in block and inline positions",
+      [
+        "#if show_note [",
+        "  = 条件付き見出し",
+        "",
+        "  条件が真のときの文章です。",
+        "] else [",
+        "  条件が偽のときの文章です。",
+        "]",
+        "",
+        "#for x in items [ループ内の文章。]",
+        "",
+        "#context [コンテキスト内の文章。]",
+        "",
+        "文中の #if flag [はい] else [いいえ] も校正対象です。",
+      ].join("\n"),
+    ],
+    [
+      "custom block macro and same-line inline macro",
+      [
+        "#note[",
+        "  = 注意事項",
+        "",
+        "  カスタムマクロ内の段落。",
+        "",
+        "  - リスト項目1",
+        "  - リスト項目2",
+        "]",
+        "",
+        "#badge[NEW] 同一行の本文。",
+      ].join("\n"),
+    ],
+    [
+      "raw() function call in block and inline forms",
+      '#raw("const a = 1;", lang: "ts", block: true)\n\nInline #raw("a + b") code.',
+    ],
   ];
 
   for (const [name, source] of samples) {
@@ -226,5 +286,42 @@ describe("textlint integration via TextlintKernel", () => {
     });
 
     expect(fixed.output).toBe("= 日本語 😀\n\nこれは *the* テストと #footnote[また the です]。\n");
+  });
+
+  it("lints prose inside table.header/cell, #figure, #if, and custom block macros at exact locations", async () => {
+    const source = [
+      "#figure(",
+      "  table(",
+      "    columns: 2,",
+      "    table.header([TODO: header], [説明]),",
+      "    table.cell(colspan: 2)[TODO: cell],",
+      "  ),",
+      "  caption: [TODO: caption],",
+      ")",
+      "",
+      "#if true [TODO: branch]",
+      "",
+      "#note[",
+      "  = TODO: macro heading",
+      "",
+      "  TODO: macro body",
+      "]",
+    ].join("\n");
+
+    const result = await kernel.lintText(source, {
+      ext: ".typ",
+      filePath: "extended.typ",
+      plugins: [{ pluginId: "typst", plugin }],
+      rules: [{ ruleId: "no-todo", rule: ruleNoTodo }],
+    });
+
+    expect(result.messages.map((m) => [m.line, m.column])).toEqual([
+      [4, 19],
+      [5, 28],
+      [7, 13],
+      [10, 11],
+      [13, 5],
+      [15, 3],
+    ]);
   });
 });
