@@ -1,0 +1,12 @@
+{
+  "name": "textlint-plugin-typst-mbt",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "scripts": {},
+  "devDependencies": {
+    "vite-plus": "catalog:"
+  }
+}
