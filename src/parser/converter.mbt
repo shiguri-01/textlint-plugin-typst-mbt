@@ -1,4 +1,25 @@
 ///|
+fn @syntax.SyntaxKind::is_space(self : @syntax.SyntaxKind) -> Bool {
+  self is (SpaceNoNewline | SpaceWithNewline)
+}
+
+///|
+fn @syntax.SyntaxKind::is_stmt_expr(self : @syntax.SyntaxKind) -> Bool {
+  self
+  is (LetBinding
+  | SetRule
+  | ShowRule
+  | ModuleImport
+  | ModuleInclude
+  | CodeBlock)
+}
+
+///|
+fn @syntax.SyntaxKind::is_control_expr(self : @syntax.SyntaxKind) -> Bool {
+  self is (Conditional | ForLoop | WhileLoop | Contextual)
+}
+
+///|
 /// A Typst CST node paired with exact UTF-16 code unit [start, end) offsets.
 priv struct SpannedNode {
   node : @syntax.SyntaxNode
@@ -8,23 +29,243 @@ priv struct SpannedNode {
 }
 
 ///|
-fn build_spanned_tree(
-  node : @syntax.SyntaxNode,
-  cursor : Ref[Int32],
-) -> SpannedNode {
-  let start = cursor.val
-  if node.is_inner() {
-    let raw_children = node.children()
-    let children : Array[SpannedNode] = Array(capacity=raw_children.length())
-    for child in raw_children {
-      children.push(build_spanned_tree(child, cursor))
+fn SpannedNode::from_cst(root : @syntax.SyntaxNode) -> Self {
+  let mut cursor : Int32 = 0
+  fn go(node : @syntax.SyntaxNode) -> SpannedNode {
+    let start = cursor
+    if node.is_inner() {
+      let children = [ for child in node.children() => go(child) ]
+      { node, start, end: cursor, children, }
+    } else {
+      cursor += node.full_text().length()
+      { node, start, end: cursor, children: [], }
     }
-    { node, start, end: cursor.val, children, }
-  } else {
-    let len = node.full_text().length()
-    cursor.val = start + len
-    { node, start, end: cursor.val, children: [], }
   }
+
+  go(root)
+}
+
+///|
+fn SpannedNode::kind(self : Self) -> @syntax.SyntaxKind {
+  self.node.kind()
+}
+
+///|
+fn SpannedNode::is_raw_block(self : Self) -> Bool {
+  (@ast.Raw::from_untyped(self.node) : @ast.Raw?).map_or(false, fn(raw) {
+    raw.block()
+  })
+}
+
+///|
+fn SpannedNode::is_display_equation(self : Self) -> Bool {
+  guard self.kind() is Equation else { false }
+  guard self.children.length() >= 3 else { false }
+  // Typst display equation has space right after opening `$` and before closing `$`.
+  guard self.children is [_, first, ..] && self.children is [.., last, _] else {
+    false
+  }
+  first.kind().is_space() && last.kind().is_space()
+}
+
+///|
+fn SpannedNode::raw_value_and_lang(self : Self) -> (String, String?) {
+  let lang = match (@ast.Raw::from_untyped(self.node) : @ast.Raw?) {
+    Some(raw) => raw.lang().map(fn(l) { l.get() })
+    None => None
+  }
+  let buf = StringBuilder()
+  let mut first = true
+  for child in self.children {
+    if child.kind() is Text {
+      if !first {
+        buf.write_char('\n')
+      }
+      buf.write_string(child.node.leaf_text())
+      first = false
+    }
+  }
+  (buf.to_string(), lang)
+}
+
+///|
+fn SpannedNode::equation_value(self : Self) -> String {
+  let buf = StringBuilder()
+  for child in self.children {
+    if !(child.kind() is Dollar) {
+      buf.write_string(child.node.full_text())
+    }
+  }
+  buf.to_string().trim().to_owned()
+}
+
+///|
+fn SpannedNode::comment_value(self : Self) -> String {
+  match self.kind() {
+    LineComment =>
+      (@ast.LineComment::from_untyped(self.node) : @ast.LineComment?).map_or_else(
+        fn() { self.node.leaf_text() },
+        fn(c) { c.text() },
+      )
+    BlockComment =>
+      (@ast.BlockComment::from_untyped(self.node) : @ast.BlockComment?).map_or_else(
+        fn() { self.node.leaf_text() },
+        fn(c) { c.text() },
+      )
+    _ => self.node.full_text()
+  }
+}
+
+///|
+fn SpannedNode::func_callee_name(self : Self) -> String? {
+  for child in self.children {
+    match child.kind() {
+      Ident => break Some(child.node.leaf_text())
+      FieldAccess => break Some(child.node.full_text())
+      _ => ()
+    }
+  } nobreak {
+    None
+  }
+}
+
+///|
+fn SpannedNode::func_args(self : Self) -> Self? {
+  for child in self.children {
+    if child.kind() is Args {
+      break Some(child)
+    }
+  } nobreak {
+    None
+  }
+}
+
+///|
+fn SpannedNode::str_literal(self : Self) -> String? {
+  guard self.kind() is Str else { None }
+  Some(@syntax.unescape_str_literal(self.node.leaf_text()))
+}
+
+///|
+fn SpannedNode::int_literal(self : Self) -> Int32? {
+  guard self.kind() is Int else { None }
+  let text = self.node.leaf_text()
+  let mut acc : Int32 = 0
+  let mut has_digit = false
+  for c in text {
+    match c {
+      '0'..<='9' => {
+        acc = acc * 10 + (c.to_int() - '0'.to_int())
+        has_digit = true
+      }
+      _ => return None
+    }
+  }
+  if has_digit {
+    Some(acc)
+  } else {
+    None
+  }
+}
+
+///|
+fn SpannedNode::bool_literal(self : Self) -> Bool? {
+  guard self.kind() is Bool else { None }
+  match self.node.leaf_text() {
+    "true" => Some(true)
+    "false" => Some(false)
+    _ => None
+  }
+}
+
+///|
+fn SpannedNode::named_arg(self : Self, name : String) -> Self? {
+  for child in self.children {
+    if child.kind() is Named {
+      let mut key_matches = false
+      let mut last_expr : SpannedNode? = None
+      for nc in child.children {
+        let k = nc.kind()
+        if !key_matches && k is Ident {
+          if nc.node.leaf_text() == name {
+            key_matches = true
+          } else {
+            break
+          }
+        } else if key_matches && !k.is_trivia() && !(k is Colon) {
+          last_expr = Some(nc)
+        }
+      }
+      if key_matches {
+        return last_expr
+      }
+    }
+  }
+  None
+}
+
+///|
+fn @syntax.SyntaxKind::is_positional_arg(self : @syntax.SyntaxKind) -> Bool {
+  !self.is_trivia() &&
+  !(self is (LeftParen | RightParen | Comma | Named | Spread))
+}
+
+///|
+fn SpannedNode::positional_args(self : Self) -> Array[Self] {
+  [
+    for child in self.children if child.kind().is_positional_arg() => child
+  ]
+}
+
+///|
+/// Collect all ContentBlock nodes inside a FuncCall's Args in source order.
+fn SpannedNode::content_blocks(self : Self) -> Array[Self] {
+  let out : Array[SpannedNode] = []
+  for child in self.children {
+    match child.kind() {
+      ContentBlock => out.push(child)
+      Named =>
+        for nc in child.children {
+          if nc.kind() is ContentBlock {
+            out.push(nc)
+          }
+        }
+      _ => ()
+    }
+  }
+  out
+}
+
+///|
+fn SpannedNode::markup_child(self : Self) -> Self? {
+  for child in self.children {
+    if child.kind() is Markup {
+      break Some(child)
+    }
+  } nobreak {
+    None
+  }
+}
+
+///|
+fn SpannedNode::has_content_block(self : Self) -> Bool {
+  if self.kind() is ContentBlock {
+    return true
+  }
+  for child in self.children {
+    if child.has_content_block() {
+      break true
+    }
+  } nobreak {
+    false
+  }
+}
+
+///|
+fn SpannedNode::is_raw_func_block(self : Self) -> Bool {
+  guard self.func_args() is Some(args) else { false }
+  guard args.named_arg("block") is Some(b) else { false }
+  b.bool_literal().unwrap_or(false)
 }
 
 ///|
@@ -34,18 +275,18 @@ priv struct Converter {
 }
 
 ///|
-fn Converter::new(source : String) -> Converter {
+fn Converter::new(source : String) -> Self {
   { source, lines: LineIndex::new(source), }
 }
 
 ///|
-fn Converter::slice(self : Converter, start : Int32, end : Int32) -> String {
+fn Converter::slice(self : Self, start : Int32, end : Int32) -> String {
   self.source.unsafe_substring(start~, end~)
 }
 
 ///|
 fn Converter::make_node(
-  self : Converter,
+  self : Self,
   kind : TxtNodeKind,
   start : Int32,
   end : Int32,
@@ -67,7 +308,7 @@ priv enum MarkupItem {
 }
 
 ///|
-fn MarkupItem::start(self : MarkupItem) -> Int32 {
+fn MarkupItem::start(self : Self) -> Int32 {
   match self {
     Single(n) => n.start
     Hashed(hash~, ..) => hash.start
@@ -75,11 +316,16 @@ fn MarkupItem::start(self : MarkupItem) -> Int32 {
 }
 
 ///|
-fn MarkupItem::end(self : MarkupItem) -> Int32 {
+fn MarkupItem::end(self : Self) -> Int32 {
   match self {
     Single(n) => n.end
     Hashed(end~, ..) => end
   }
+}
+
+///|
+fn MarkupItem::is_space(self : Self) -> Bool {
+  self is Single(n) && n.kind().is_space()
 }
 
 ///|
@@ -89,11 +335,11 @@ fn group_markup_items(nodes : Array[SpannedNode]) -> Array[MarkupItem] {
   let mut i = 0
   while i < len {
     let cur = nodes[i]
-    if cur.node.kind() is Hash && i + 1 < len {
+    if cur.kind() is Hash && i + 1 < len {
       let expr = nodes[i + 1]
       let mut end = expr.end
       let mut next_i = i + 2
-      if next_i < len && nodes[next_i].node.kind() is Semicolon {
+      if next_i < len && nodes[next_i].kind() is Semicolon {
         end = nodes[next_i].end
         next_i += 1
       }
@@ -108,307 +354,61 @@ fn group_markup_items(nodes : Array[SpannedNode]) -> Array[MarkupItem] {
 }
 
 ///|
-fn is_space_kind(kind : @syntax.SyntaxKind) -> Bool {
-  kind is (SpaceNoNewline | SpaceWithNewline)
-}
-
-///|
-fn is_raw_block(node : @syntax.SyntaxNode) -> Bool {
-  match (@ast.Raw::from_untyped(node) : @ast.Raw?) {
-    Some(raw) => raw.block()
-    None => false
-  }
-}
-
-///|
-fn is_display_equation(node : SpannedNode) -> Bool {
-  if !(node.node.kind() is Equation) {
-    return false
-  }
-  let children = node.children
-  if children.length() < 3 {
-    return false
-  }
-  // Typst display equation has space right after opening `$` and before closing `$`.
-  is_space_kind(children[1].node.kind()) &&
-  is_space_kind(children[children.length() - 2].node.kind())
-}
-
-///|
-fn extract_raw_value_and_lang(node : SpannedNode) -> (String, String?) {
-  let lang : String? = match (@ast.Raw::from_untyped(node.node) : @ast.Raw?) {
-    Some(raw) => raw.lang().map(fn(l) { l.get() })
-    None => None
-  }
-  let buf = StringBuilder()
-  let mut first = true
-  for child in node.children {
-    match child.node.kind() {
-      Text => {
-        if !first {
-          buf.write_char('\n')
-        }
-        buf.write_string(child.node.leaf_text())
-        first = false
-      }
-      _ => ()
-    }
-  }
-  (buf.to_string(), lang)
-}
-
-///|
-fn extract_equation_value(node : SpannedNode) -> String {
-  let buf = StringBuilder()
-  for child in node.children {
-    if !(child.node.kind() is Dollar) {
-      buf.write_string(child.node.full_text())
-    }
-  }
-  buf.to_string().trim().to_owned()
-}
-
-///|
-fn extract_comment_value(node : SpannedNode) -> String {
-  match node.node.kind() {
-    LineComment =>
-      match (@ast.LineComment::from_untyped(node.node) : @ast.LineComment?) {
-        Some(c) => c.text()
-        None => node.node.leaf_text()
-      }
-    BlockComment =>
-      match (@ast.BlockComment::from_untyped(node.node) : @ast.BlockComment?) {
-        Some(c) => c.text()
-        None => node.node.leaf_text()
-      }
-    _ => node.node.full_text()
-  }
-}
-
-///|
-fn extract_func_callee_name(func_call : SpannedNode) -> String? {
-  for child in func_call.children {
-    match child.node.kind() {
-      Ident => return Some(child.node.leaf_text())
-      FieldAccess => return Some(child.node.full_text())
-      _ => ()
-    }
-  }
-  None
-}
-
-///|
-fn find_func_args(func_call : SpannedNode) -> SpannedNode? {
-  for child in func_call.children {
-    if child.node.kind() is Args {
-      return Some(child)
-    }
-  }
-  None
-}
-
-///|
-fn extract_str_literal(node : SpannedNode) -> String? {
-  if node.node.kind() is Str {
-    Some(@syntax.unescape_str_literal(node.node.leaf_text()))
-  } else {
-    None
-  }
-}
-
-///|
-fn extract_int_literal(node : SpannedNode) -> Int32? {
-  if !(node.node.kind() is Int) {
-    return None
-  }
-  let text = node.node.leaf_text()
-  let mut acc = 0
-  let mut has_digit = false
-  for i = 0; i < text.length(); i = i + 1 {
-    let c = text.code_unit_at(i).to_int()
-    if c >= '0' && c <= '9' {
-      acc = acc * 10 + (c - '0')
-      has_digit = true
-    } else {
-      return None
-    }
-  }
-  if has_digit {
-    Some(acc)
-  } else {
-    None
-  }
-}
-
-///|
-fn extract_named_arg(args : SpannedNode, name : String) -> SpannedNode? {
-  for child in args.children {
-    if child.node.kind() is Named {
-      let mut key_matches = false
-      let mut last_expr : SpannedNode? = None
-      for nc in child.children {
-        let k = nc.node.kind()
-        if !key_matches && k is Ident {
-          if nc.node.leaf_text() == name {
-            key_matches = true
-          } else {
-            break
-          }
-        } else if key_matches && !k.is_trivia() && !(k is Colon) {
-          last_expr = Some(nc)
-        }
-      }
-      if key_matches {
-        return last_expr
-      }
-    }
-  }
-  None
-}
-
-///|
-fn extract_positional_args(args : SpannedNode) -> Array[SpannedNode] {
-  let out : Array[SpannedNode] = []
-  for child in args.children {
-    let k = child.node.kind()
-    if !k.is_trivia() &&
-      !(k is LeftParen) &&
-      !(k is RightParen) &&
-      !(k is Comma) &&
-      !(k is Named) &&
-      !(k is Spread) {
-      out.push(child)
-    }
-  }
-  out
-}
-
-///|
-/// Collect all ContentBlock nodes inside a FuncCall's Args in source order.
-fn collect_content_blocks(args : SpannedNode) -> Array[SpannedNode] {
-  let out : Array[SpannedNode] = []
-  for child in args.children {
-    match child.node.kind() {
-      ContentBlock => out.push(child)
-      Named =>
-        for nc in child.children {
-          if nc.node.kind() is ContentBlock {
-            out.push(nc)
-          }
-        }
-      _ => ()
-    }
-  }
-  out
-}
-
-///|
-fn find_markup_child(node : SpannedNode) -> SpannedNode? {
-  for child in node.children {
-    if child.node.kind() is Markup {
-      return Some(child)
-    }
-  }
-  None
-}
-
-///|
-fn extract_bool_literal(node : SpannedNode) -> Bool? {
-  if !(node.node.kind() is Bool) {
-    return None
-  }
-  match node.node.leaf_text() {
-    "true" => Some(true)
-    "false" => Some(false)
-    _ => None
-  }
-}
-
-///|
 fn is_block_func_name(name : String) -> Bool {
-  match name {
-    "heading"
-    | "quote"
-    | "line"
-    | "table"
-    | "figure"
-    | "block"
-    | "align"
-    | "pad"
-    | "rect"
-    | "grid"
-    | "columns"
-    | "stack"
-    | "place"
-    | "pagebreak"
-    | "parbreak" => true
-    _ => false
-  }
+  name
+  is ("heading"
+  | "quote"
+  | "line"
+  | "table"
+  | "figure"
+  | "block"
+  | "align"
+  | "pad"
+  | "rect"
+  | "grid"
+  | "columns"
+  | "stack"
+  | "place"
+  | "pagebreak"
+  | "parbreak")
 }
 
 ///|
 fn is_inline_only_func_name(name : String) -> Bool {
-  match name {
-    "strong"
-    | "emph"
-    | "strike"
-    | "underline"
-    | "overline"
-    | "highlight"
-    | "smallcaps"
-    | "sub"
-    | "super"
-    | "link"
-    | "image"
-    | "text"
-    | "footnote"
-    | "cite"
-    | "ref"
-    | "h"
-    | "box" => true
-    _ => false
-  }
+  name
+  is ("strong"
+  | "emph"
+  | "strike"
+  | "underline"
+  | "overline"
+  | "highlight"
+  | "smallcaps"
+  | "sub"
+  | "super"
+  | "link"
+  | "image"
+  | "text"
+  | "footnote"
+  | "cite"
+  | "ref"
+  | "h"
+  | "box")
 }
 
 ///|
-fn is_stmt_expr_kind(kind : @syntax.SyntaxKind) -> Bool {
-  kind
-  is (LetBinding
-  | SetRule
-  | ShowRule
-  | ModuleImport
-  | ModuleInclude
-  | CodeBlock)
-}
-
-///|
-fn is_control_expr_kind(kind : @syntax.SyntaxKind) -> Bool {
-  kind is (Conditional | ForLoop | WhileLoop | Contextual)
-}
-
-///|
-fn has_content_block_recursive(node : SpannedNode) -> Bool {
-  if node.node.kind() is ContentBlock {
-    return true
-  }
-  for child in node.children {
-    if has_content_block_recursive(child) {
-      return true
+fn is_only_whitespace_items(items : Array[MarkupItem]) -> Bool {
+  for item in items {
+    if !item.is_space() {
+      break false
     }
+  } nobreak {
+    true
   }
-  false
 }
 
 ///|
-fn is_raw_func_block(func_call : SpannedNode) -> Bool {
-  match find_func_args(func_call) {
-    Some(args) =>
-      match extract_named_arg(args, "block") {
-        Some(b) => extract_bool_literal(b).unwrap_or(false)
-        None => false
-      }
-    None => false
-  }
+fn ends_with_newline_item(items : Array[MarkupItem]) -> Bool {
+  items is [.., Single(n)] && n.kind() is SpaceWithNewline
 }
 
 ///|
@@ -416,27 +416,26 @@ fn is_followed_by_same_line_inline(
   items : Array[MarkupItem],
   idx : Int32,
 ) -> Bool {
-  let len = items.length()
-  let mut j = idx + 1
-  while j < len {
-    match items[j] {
+  for item in items[idx + 1:] {
+    match item {
       Single(n) =>
-        match n.node.kind() {
-          SpaceNoNewline => j += 1
+        match n.kind() {
+          SpaceNoNewline => ()
           SpaceWithNewline | Parbreak | LineComment | BlockComment =>
-            return false
-          _ => return true
+            break false
+          _ => break true
         }
-      Hashed(..) => return true
+      Hashed(..) => break true
     }
+  } nobreak {
+    false
   }
-  false
 }
 
 ///|
 /// Convert a Typst `Markup` node's children into block-level TxtAST nodes.
 fn Converter::convert_markup_blocks(
-  self : Converter,
+  self : Self,
   nodes : Array[SpannedNode],
 ) -> Array[TxtNode] {
   let items = group_markup_items(nodes)
@@ -445,9 +444,8 @@ fn Converter::convert_markup_blocks(
 
   fn flush_paragraph() -> Unit {
     if !inline_buf.is_empty() {
-      match self.build_paragraph(inline_buf) {
-        Some(p) => blocks.push(p)
-        None => ()
+      if self.build_paragraph(inline_buf) is Some(p) {
+        blocks.push(p)
       }
       inline_buf.clear()
     }
@@ -459,8 +457,8 @@ fn Converter::convert_markup_blocks(
     let item = items[i]
     match item {
       Single(node) =>
-        match node.node.kind() {
-          Parbreak => {
+        match node.kind() {
+          Parbreak | Shebang => {
             flush_paragraph()
             i += 1
           }
@@ -469,36 +467,24 @@ fn Converter::convert_markup_blocks(
             blocks.push(self.convert_heading(node))
             i += 1
           }
-          ListItem => {
+          ListItem | EnumItem | TermItem as item_kind => {
             flush_paragraph()
-            let (list_node, next_i) = self.consume_list(items, i, ListItem)
+            let (list_node, next_i) = self.consume_list(items, i, item_kind)
             blocks.push(list_node)
             i = next_i
           }
-          EnumItem => {
+          Raw if node.is_raw_block() => {
             flush_paragraph()
-            let (list_node, next_i) = self.consume_list(items, i, EnumItem)
-            blocks.push(list_node)
-            i = next_i
-          }
-          TermItem => {
-            flush_paragraph()
-            let (list_node, next_i) = self.consume_list(items, i, TermItem)
-            blocks.push(list_node)
-            i = next_i
-          }
-          Raw if is_raw_block(node.node) => {
-            flush_paragraph()
-            let (value, lang) = extract_raw_value_and_lang(node)
+            let (value, lang) = node.raw_value_and_lang()
             blocks.push(
               self.make_node(CodeBlock(value~, lang~), node.start, node.end),
             )
             i += 1
           }
-          Equation if is_display_equation(node) &&
+          Equation if node.is_display_equation() &&
             is_only_whitespace_items(inline_buf) => {
             flush_paragraph()
-            let value = extract_equation_value(node)
+            let value = node.equation_value()
             blocks.push(
               self.make_node(
                 CodeBlock(value~, lang=Some("math")),
@@ -511,12 +497,8 @@ fn Converter::convert_markup_blocks(
           LineComment | BlockComment if is_only_whitespace_items(inline_buf) ||
             ends_with_newline_item(inline_buf) => {
             flush_paragraph()
-            let value = extract_comment_value(node)
+            let value = node.comment_value()
             blocks.push(self.make_node(Comment(value~), node.start, node.end))
-            i += 1
-          }
-          Shebang => {
-            flush_paragraph()
             i += 1
           }
           _ => {
@@ -525,8 +507,8 @@ fn Converter::convert_markup_blocks(
           }
         }
       Hashed(hash~, expr~, end~) => {
-        let ek = expr.node.kind()
-        if is_stmt_expr_kind(ek) && is_only_whitespace_items(inline_buf) {
+        let ek = expr.kind()
+        if ek.is_stmt_expr() && is_only_whitespace_items(inline_buf) {
           inline_buf.clear()
           let value = self.slice(hash.start, end)
           blocks.push(
@@ -539,19 +521,15 @@ fn Converter::convert_markup_blocks(
           i += 1
         } else if ek is ContentBlock && is_only_whitespace_items(inline_buf) {
           inline_buf.clear()
-          match find_markup_child(expr) {
-            Some(markup) =>
-              for b in self.convert_markup_blocks(markup.children) {
-                blocks.push(b)
-              }
-            None => ()
+          if expr.markup_child() is Some(markup) {
+            blocks.append(self.convert_markup_blocks(markup.children))
           }
           i += 1
-        } else if is_control_expr_kind(ek) &&
+        } else if ek.is_control_expr() &&
           is_only_whitespace_items(inline_buf) &&
           !is_followed_by_same_line_inline(items, i) {
           inline_buf.clear()
-          if has_content_block_recursive(expr) {
+          if expr.has_content_block() {
             self.extract_blocks_from_expr(expr, blocks)
           } else {
             let value = self.slice(hash.start, end)
@@ -565,25 +543,24 @@ fn Converter::convert_markup_blocks(
           }
           i += 1
         } else if ek is FuncCall && is_only_whitespace_items(inline_buf) {
-          match extract_func_callee_name(expr) {
-            Some("raw") if is_raw_func_block(expr) => {
+          match expr.func_callee_name() {
+            Some("raw") if expr.is_raw_func_block() => {
               inline_buf.clear()
-              for
-                b in self.convert_block_func_call("raw", expr, hash.start, end) {
-                blocks.push(b)
-              }
+              blocks.append(
+                self.convert_block_func_call("raw", expr, hash.start, end),
+              )
               i += 1
             }
             Some(name) if is_block_func_name(name) => {
               inline_buf.clear()
-              for b in self.convert_block_func_call(name, expr, hash.start, end) {
-                blocks.push(b)
-              }
+              blocks.append(
+                self.convert_block_func_call(name, expr, hash.start, end),
+              )
               i += 1
             }
             Some(name) if !is_inline_only_func_name(name) &&
               !is_followed_by_same_line_inline(items, i) &&
-              has_content_block_recursive(expr) => {
+              expr.has_content_block() => {
               inline_buf.clear()
               self.extract_blocks_from_expr(expr, blocks)
               i += 1
@@ -605,45 +582,13 @@ fn Converter::convert_markup_blocks(
 }
 
 ///|
-fn is_only_whitespace_items(items : Array[MarkupItem]) -> Bool {
-  for item in items {
-    match item {
-      Single(n) if is_space_kind(n.node.kind()) => ()
-      _ => return false
-    }
-  }
-  true
-}
-
-///|
-fn ends_with_newline_item(items : Array[MarkupItem]) -> Bool {
-  if items.is_empty() {
-    return false
-  }
-  match items[items.length() - 1] {
-    Single(n) => n.node.kind() is SpaceWithNewline
-    _ => false
-  }
-}
-
-///|
-fn Converter::convert_heading(
-  self : Converter,
-  heading : SpannedNode,
-) -> TxtNode {
-  let raw_depth = match
-    (@ast.Heading::from_untyped(heading.node) : @ast.Heading?) {
-    Some(h) => h.depth()
-    None => 1
-  }
-  let depth = if raw_depth < 1 {
-    1
-  } else if raw_depth > 6 {
-    6
-  } else {
-    raw_depth
-  }
-  let children = match find_markup_child(heading) {
+fn Converter::convert_heading(self : Self, heading : SpannedNode) -> TxtNode {
+  let raw_depth = (@ast.Heading::from_untyped(heading.node) : @ast.Heading?).map_or(
+    1,
+    fn(h) { h.depth() },
+  )
+  let depth = raw_depth.clamp(min=1, max=6)
+  let children = match heading.markup_child() {
     Some(markup) => self.convert_inline_nodes(markup.children)
     None => []
   }
@@ -652,7 +597,7 @@ fn Converter::convert_heading(
 
 ///|
 fn Converter::consume_list(
-  self : Converter,
+  self : Self,
   items : Array[MarkupItem],
   start_idx : Int32,
   item_kind : @syntax.SyntaxKind,
@@ -664,46 +609,38 @@ fn Converter::consume_list(
   let mut first_enum_start : Int32? = None
   let len = items.length()
   while i < len {
-    match items[i] {
-      Single(node) if node.node.kind() == item_kind => {
-        if item_kind is EnumItem && list_items.is_empty() {
-          match (@ast.EnumItem::from_untyped(node.node) : @ast.EnumItem?) {
-            Some(ei) =>
-              first_enum_start = match ei.number() {
-                Some(n) => Some(n.to_int())
-                None => Some(1)
-              }
-            None => first_enum_start = Some(1)
-          }
-        }
-        list_items.push(self.convert_list_item(node, item_kind))
-        last_item_end = node.end
-        i += 1
-        // Look ahead over spaces/parbreaks to see if another item of the same kind follows.
-        let mut j = i
-        let mut saw_parbreak = false
-        while j < len {
-          match items[j] {
-            Single(s) if is_space_kind(s.node.kind()) => j += 1
-            Single(s) if s.node.kind() is Parbreak => {
-              saw_parbreak = true
-              j += 1
-            }
-            _ => break
-          }
-        }
-        if j < len &&
-          items[j] is Single(next_node) &&
-          next_node.node.kind() == item_kind {
-          if saw_parbreak {
-            spread = true
-          }
-          i = j
-        } else {
-          break
-        }
+    guard items[i] is Single(node) && node.kind() == item_kind else { break }
+    if item_kind is EnumItem && list_items.is_empty() {
+      let start_num = match
+        (@ast.EnumItem::from_untyped(node.node) : @ast.EnumItem?) {
+        Some(ei) => ei.number().map_or(1, fn(n) { n.to_int() })
+        None => 1
       }
-      _ => break
+      first_enum_start = Some(start_num)
+    }
+    list_items.push(self.convert_list_item(node, item_kind))
+    last_item_end = node.end
+    i += 1
+    // Look ahead over spaces/parbreaks to see if another item of the same kind follows.
+    let mut j = i
+    let mut saw_parbreak = false
+    while j < len {
+      match items[j] {
+        Single(s) if s.kind().is_space() => j += 1
+        Single(s) if s.kind() is Parbreak => {
+          saw_parbreak = true
+          j += 1
+        }
+        _ => break
+      }
+    }
+    if j < len && items[j] is Single(next_node) && next_node.kind() == item_kind {
+      if saw_parbreak {
+        spread = true
+      }
+      i = j
+    } else {
+      break
     }
   }
   let ordered = item_kind is EnumItem
@@ -718,7 +655,7 @@ fn Converter::consume_list(
 
 ///|
 fn Converter::convert_list_item(
-  self : Converter,
+  self : Self,
   node : SpannedNode,
   item_kind : @syntax.SyntaxKind,
 ) -> TxtNode {
@@ -727,19 +664,13 @@ fn Converter::convert_list_item(
     TermItem =>
       // TermItem has two Markup children: term and description.
       for child in node.children {
-        if child.node.kind() is Markup {
-          for b in self.convert_markup_blocks(child.children) {
-            children.push(b)
-          }
+        if child.kind() is Markup {
+          children.append(self.convert_markup_blocks(child.children))
         }
       }
     _ =>
-      match find_markup_child(node) {
-        Some(markup) =>
-          for b in self.convert_markup_blocks(markup.children) {
-            children.push(b)
-          }
-        None => ()
+      if node.markup_child() is Some(markup) {
+        children.append(self.convert_markup_blocks(markup.children))
       }
   }
   let spread = children.length() > 1
@@ -748,7 +679,7 @@ fn Converter::convert_list_item(
 
 ///|
 fn Converter::convert_block_func_call(
-  self : Converter,
+  self : Self,
   name : String,
   func_call : SpannedNode,
   start : Int32,
@@ -760,118 +691,85 @@ fn Converter::convert_block_func_call(
     "heading" => {
       let mut depth = 1
       let mut body_children : Array[TxtNode] = []
-      match find_func_args(func_call) {
-        Some(args) => {
-          match extract_named_arg(args, "level") {
-            Some(lvl_node) =>
-              match extract_int_literal(lvl_node) {
-                Some(n) => depth = if n < 1 { 1 } else if n > 6 { 6 } else { n }
-                None => ()
-              }
-            None => ()
-          }
-          let content_blocks = collect_content_blocks(args)
-          if !content_blocks.is_empty() {
-            match find_markup_child(content_blocks[0]) {
-              Some(markup) =>
-                body_children = self.convert_inline_nodes(markup.children)
-              None => ()
-            }
-          }
+      if func_call.func_args() is Some(args) {
+        if args.named_arg("level") is Some(lvl_node) &&
+          lvl_node.int_literal() is Some(n) {
+          depth = n.clamp(min=1, max=6)
         }
-        None => ()
+        if args.content_blocks() is [first_cb, ..] &&
+          first_cb.markup_child() is Some(markup) {
+          body_children = self.convert_inline_nodes(markup.children)
+        }
       }
       [self.make_node(Header(depth~, children=body_children), start, end)]
     }
     "quote" => {
       let body_blocks : Array[TxtNode] = []
-      match find_func_args(func_call) {
-        Some(args) =>
-          for cb in collect_content_blocks(args) {
-            match find_markup_child(cb) {
-              Some(markup) =>
-                for b in self.convert_markup_blocks(markup.children) {
-                  body_blocks.push(b)
-                }
-              None => ()
-            }
+      if func_call.func_args() is Some(args) {
+        for cb in args.content_blocks() {
+          if cb.markup_child() is Some(markup) {
+            body_blocks.append(self.convert_markup_blocks(markup.children))
           }
-        None => ()
+        }
       }
       [self.make_node(BlockQuote(body_blocks), start, end)]
     }
     "raw" => {
       let mut value = ""
       let mut lang : String? = None
-      match find_func_args(func_call) {
-        Some(args) => {
-          let pos = extract_positional_args(args)
-          if !pos.is_empty() {
-            match extract_str_literal(pos[0]) {
-              Some(s) => value = s
-              None => ()
-            }
-          }
-          match extract_named_arg(args, "lang") {
-            Some(lang_node) => lang = extract_str_literal(lang_node)
-            None => ()
-          }
+      if func_call.func_args() is Some(args) {
+        if args.positional_args() is [first_arg, ..] &&
+          first_arg.str_literal() is Some(s) {
+          value = s
         }
-        None => ()
+        if args.named_arg("lang") is Some(lang_node) {
+          lang = lang_node.str_literal()
+        }
       }
       [self.make_node(CodeBlock(value~, lang~), start, end)]
     }
-    "table" =>
-      match find_func_args(func_call) {
-        Some(args) => {
-          let mut col_count = 1
-          match extract_named_arg(args, "columns") {
-            Some(cols_node) =>
-              match extract_int_literal(cols_node) {
-                Some(n) if n > 0 => col_count = n
-                _ =>
-                  if cols_node.node.kind() is Array {
-                    let count = extract_positional_args(cols_node).length()
-                    if count > 0 {
-                      col_count = count
-                    }
-                  }
+    "table" => {
+      guard func_call.func_args() is Some(args) else { [] }
+      let mut col_count = 1
+      if args.named_arg("columns") is Some(cols_node) {
+        match cols_node.int_literal() {
+          Some(n) if n > 0 => col_count = n
+          _ =>
+            if cols_node.kind() is Array {
+              let count = cols_node.positional_args().length()
+              if count > 0 {
+                col_count = count
               }
-            None => ()
-          }
-          let cells : Array[TxtNode] = []
-          self.collect_table_cells(args, cells)
-          if cells.is_empty() {
-            []
-          } else {
-            let rows : Array[TxtNode] = []
-            let mut idx = 0
-            while idx < cells.length() {
-              let row_cells : Array[TxtNode] = []
-              let row_start = cells[idx].range_start
-              let mut row_end = cells[idx].range_end
-              let mut c = 0
-              while c < col_count && idx < cells.length() {
-                let cell = cells[idx]
-                row_cells.push(cell)
-                row_end = cell.range_end
-                idx += 1
-                c += 1
-              }
-              rows.push(self.make_node(TableRow(row_cells), row_start, row_end))
             }
-            [self.make_node(Table(rows), start, end)]
-          }
         }
-        None => []
       }
+      let cells : Array[TxtNode] = []
+      self.collect_table_cells(args, cells)
+      guard !cells.is_empty() else { [] }
+      let rows : Array[TxtNode] = []
+      let mut idx = 0
+      while idx < cells.length() {
+        let row_cells : Array[TxtNode] = []
+        let row_start = cells[idx].range_start
+        let mut row_end = cells[idx].range_end
+        let mut c = 0
+        while c < col_count && idx < cells.length() {
+          let cell = cells[idx]
+          row_cells.push(cell)
+          row_end = cell.range_end
+          idx += 1
+          c += 1
+        }
+        rows.push(self.make_node(TableRow(row_cells), row_start, row_end))
+      }
+      [self.make_node(Table(rows), start, end)]
+    }
     _ => {
       // Container functions (figure, block, align, pad, rect, grid, columns, etc.):
       // Recursively extract blocks from arguments in source order.
       let out : Array[TxtNode] = []
-      match find_func_args(func_call) {
-        Some(args) => self.extract_blocks_from_expr(args, out)
-        None => ()
+      if func_call.func_args() is Some(args) {
+        self.extract_blocks_from_expr(args, out)
       }
       out
     }
@@ -880,39 +778,36 @@ fn Converter::convert_block_func_call(
 
 ///|
 fn Converter::collect_table_cells(
-  self : Converter,
+  self : Self,
   args : SpannedNode,
   cells : Array[TxtNode],
 ) -> Unit {
-  for arg in extract_positional_args(args) {
-    match arg.node.kind() {
+  for arg in args.positional_args() {
+    match arg.kind() {
       ContentBlock => {
-        let cell_children = match find_markup_child(arg) {
+        let cell_children = match arg.markup_child() {
           Some(markup) => self.convert_inline_nodes(markup.children)
           None => []
         }
         cells.push(self.make_node(TableCell(cell_children), arg.start, arg.end))
       }
       FuncCall =>
-        match extract_func_callee_name(arg) {
+        match arg.func_callee_name() {
           Some("table.header") | Some("table.footer") =>
-            match find_func_args(arg) {
-              Some(sub_args) => self.collect_table_cells(sub_args, cells)
-              None => ()
+            if arg.func_args() is Some(sub_args) {
+              self.collect_table_cells(sub_args, cells)
             }
           Some("table.cell") =>
-            match find_func_args(arg) {
-              Some(sub_args) =>
-                for cb in collect_content_blocks(sub_args) {
-                  let cell_children = match find_markup_child(cb) {
-                    Some(markup) => self.convert_inline_nodes(markup.children)
-                    None => []
-                  }
-                  cells.push(
-                    self.make_node(TableCell(cell_children), cb.start, cb.end),
-                  )
+            if arg.func_args() is Some(sub_args) {
+              for cb in sub_args.content_blocks() {
+                let cell_children = match cb.markup_child() {
+                  Some(markup) => self.convert_inline_nodes(markup.children)
+                  None => []
                 }
-              None => ()
+                cells.push(
+                  self.make_node(TableCell(cell_children), cb.start, cb.end),
+                )
+              }
             }
           _ => ()
         }
@@ -925,39 +820,32 @@ fn Converter::collect_table_cells(
 /// Recursively extract block-level TxtAST nodes from arbitrary Typst expressions
 /// (ContentBlock, nested FuncCall, control flow, arrays, named args) in source order.
 fn Converter::extract_blocks_from_expr(
-  self : Converter,
+  self : Self,
   expr : SpannedNode,
   out : Array[TxtNode],
 ) -> Unit {
-  match expr.node.kind() {
+  match expr.kind() {
     ContentBlock =>
-      match find_markup_child(expr) {
-        Some(markup) =>
-          for b in self.convert_markup_blocks(markup.children) {
-            out.push(b)
-          }
-        None => ()
+      if expr.markup_child() is Some(markup) {
+        out.append(self.convert_markup_blocks(markup.children))
       }
     FuncCall =>
-      match extract_func_callee_name(expr) {
-        Some("raw") if is_raw_func_block(expr) =>
-          for
-            b in self.convert_block_func_call("raw", expr, expr.start, expr.end) {
-            out.push(b)
-          }
+      match expr.func_callee_name() {
+        Some("raw") if expr.is_raw_func_block() =>
+          out.append(
+            self.convert_block_func_call("raw", expr, expr.start, expr.end),
+          )
         Some(name) if is_block_func_name(name) =>
-          for
-            b in self.convert_block_func_call(name, expr, expr.start, expr.end) {
-            out.push(b)
-          }
+          out.append(
+            self.convert_block_func_call(name, expr, expr.start, expr.end),
+          )
         Some("image") => {
           let img = self.convert_image_func(expr, expr.start, expr.end)
           out.push(self.make_node(Paragraph([img]), expr.start, expr.end))
         }
         _ =>
-          match find_func_args(expr) {
-            Some(args) => self.extract_blocks_from_expr(args, out)
-            None => ()
+          if expr.func_args() is Some(args) {
+            self.extract_blocks_from_expr(args, out)
           }
       }
     LetBinding | SetRule | ShowRule | ModuleImport | ModuleInclude => ()
@@ -970,22 +858,17 @@ fn Converter::extract_blocks_from_expr(
 
 ///|
 fn Converter::build_paragraph(
-  self : Converter,
+  self : Self,
   items : Array[MarkupItem],
 ) -> TxtNode? {
   let children = self.convert_inline_items(items)
-  if children.is_empty() {
-    None
-  } else {
-    let start = children[0].range_start
-    let end = children[children.length() - 1].range_end
-    Some(self.make_node(Paragraph(children), start, end))
-  }
+  guard children is [first, ..] && children is [.., last] else { None }
+  Some(self.make_node(Paragraph(children), first.range_start, last.range_end))
 }
 
 ///|
 fn Converter::convert_inline_nodes(
-  self : Converter,
+  self : Self,
   nodes : Array[SpannedNode],
 ) -> Array[TxtNode] {
   self.convert_inline_items(group_markup_items(nodes))
@@ -995,23 +878,17 @@ fn Converter::convert_inline_nodes(
 /// Convert a slice of MarkupItems into inline TxtAST nodes,
 /// trimming leading/trailing spaces and merging adjacent plain text into Str nodes.
 fn Converter::convert_inline_items(
-  self : Converter,
+  self : Self,
   items : Array[MarkupItem],
 ) -> Array[TxtNode] {
   // Trim leading and trailing pure whitespace items.
   let mut lo = 0
   let mut hi = items.length()
-  while lo < hi {
-    match items[lo] {
-      Single(n) if is_space_kind(n.node.kind()) => lo += 1
-      _ => break
-    }
+  while lo < hi && items[lo].is_space() {
+    lo += 1
   }
-  while hi > lo {
-    match items[hi - 1] {
-      Single(n) if is_space_kind(n.node.kind()) => hi -= 1
-      _ => break
-    }
+  while hi > lo && items[hi - 1].is_space() {
+    hi -= 1
   }
   let out : Array[TxtNode] = []
   let mut str_start : Int32? = None
@@ -1019,41 +896,29 @@ fn Converter::convert_inline_items(
   let str_buf = StringBuilder()
 
   fn flush_str() -> Unit {
-    match str_start {
-      Some(s) => {
-        out.push(self.make_node(Str(value=str_buf.to_string()), s, str_end))
-        str_start = None
-        str_buf.reset()
-      }
-      None => ()
+    if str_start is Some(s) {
+      out.push(self.make_node(Str(value=str_buf.to_string()), s, str_end))
+      str_start = None
+      str_buf.reset()
     }
   }
 
   fn push_str_piece(start : Int32, end : Int32, piece : String) -> Unit {
-    match str_start {
-      Some(_) =>
-        if start == str_end {
-          str_buf.write_string(piece)
-          str_end = end
-        } else {
-          flush_str()
-          str_start = Some(start)
-          str_end = end
-          str_buf.write_string(piece)
-        }
-      None => {
-        str_start = Some(start)
-        str_end = end
-        str_buf.write_string(piece)
-      }
+    if str_start is Some(_) && start == str_end {
+      str_buf.write_string(piece)
+      str_end = end
+    } else {
+      flush_str()
+      str_start = Some(start)
+      str_end = end
+      str_buf.write_string(piece)
     }
   }
 
-  for idx = lo; idx < hi; idx = idx + 1 {
-    let item = items[idx]
+  for item in items[lo:hi] {
     match item {
       Single(node) =>
-        match node.node.kind() {
+        match node.kind() {
           Text | SpaceNoNewline | SpaceWithNewline | SmartQuote =>
             push_str_piece(
               node.start,
@@ -1062,20 +927,18 @@ fn Converter::convert_inline_items(
             )
           Escape => {
             flush_str()
-            let ch = match
-              (@ast.Escape::from_untyped(node.node) : @ast.Escape?) {
-              Some(esc) => esc.get().to_string()
-              None => self.slice(node.start, node.end)
-            }
+            let ch = (@ast.Escape::from_untyped(node.node) : @ast.Escape?).map_or_else(
+              fn() { self.slice(node.start, node.end) },
+              fn(esc) { esc.get().to_string() },
+            )
             out.push(self.make_node(Str(value=ch), node.start, node.end))
           }
           Shorthand => {
             flush_str()
-            let ch = match
-              (@ast.Shorthand::from_untyped(node.node) : @ast.Shorthand?) {
-              Some(sh) => sh.get().to_string()
-              None => self.slice(node.start, node.end)
-            }
+            let ch = (@ast.Shorthand::from_untyped(node.node) : @ast.Shorthand?).map_or_else(
+              fn() { self.slice(node.start, node.end) },
+              fn(sh) { sh.get().to_string() },
+            )
             out.push(self.make_node(Str(value=ch), node.start, node.end))
           }
           Linebreak => {
@@ -1084,7 +947,7 @@ fn Converter::convert_inline_items(
           }
           Strong => {
             flush_str()
-            let children = match find_markup_child(node) {
+            let children = match node.markup_child() {
               Some(markup) => self.convert_inline_nodes(markup.children)
               None => []
             }
@@ -1092,7 +955,7 @@ fn Converter::convert_inline_items(
           }
           Emph => {
             flush_str()
-            let children = match find_markup_child(node) {
+            let children = match node.markup_child() {
               Some(markup) => self.convert_inline_nodes(markup.children)
               None => []
             }
@@ -1112,34 +975,33 @@ fn Converter::convert_inline_items(
           }
           Raw => {
             flush_str()
-            let (value, _) = extract_raw_value_and_lang(node)
+            let (value, _) = node.raw_value_and_lang()
             out.push(self.make_node(Code(value~), node.start, node.end))
           }
           Equation => {
             flush_str()
-            let value = extract_equation_value(node)
+            let value = node.equation_value()
             out.push(self.make_node(Code(value~), node.start, node.end))
           }
           LineComment | BlockComment => {
             flush_str()
-            let value = extract_comment_value(node)
+            let value = node.comment_value()
             out.push(self.make_node(Comment(value~), node.start, node.end))
           }
           Ref => {
             flush_str()
             let mut supplement_markup : SpannedNode? = None
             for child in node.children {
-              if child.node.kind() is ContentBlock {
-                supplement_markup = find_markup_child(child)
+              if child.kind() is ContentBlock {
+                supplement_markup = child.markup_child()
               }
             }
             match supplement_markup {
               Some(markup) => {
-                let target = match
-                  (@ast.Ref::from_untyped(node.node) : @ast.Ref?) {
-                  Some(r) => "@" + r.target()
-                  None => self.slice(node.start, node.end)
-                }
+                let target = (@ast.Ref::from_untyped(node.node) : @ast.Ref?).map_or_else(
+                  fn() { self.slice(node.start, node.end) },
+                  fn(r) { "@" + r.target() },
+                )
                 let children = self.convert_inline_nodes(markup.children)
                 out.push(
                   self.make_node(
@@ -1170,9 +1032,7 @@ fn Converter::convert_inline_items(
         }
       Hashed(hash~, expr~, end~) => {
         flush_str()
-        for inline_node in self.convert_inline_hashed(hash, expr, end) {
-          out.push(inline_node)
-        }
+        out.append(self.convert_inline_hashed(hash, expr, end))
       }
     }
   }
@@ -1182,20 +1042,20 @@ fn Converter::convert_inline_items(
 
 ///|
 fn Converter::convert_inline_hashed(
-  self : Converter,
+  self : Self,
   hash : SpannedNode,
   expr : SpannedNode,
   end : Int32,
 ) -> Array[TxtNode] {
   let start = hash.start
-  match expr.node.kind() {
+  match expr.kind() {
     ContentBlock =>
-      match find_markup_child(expr) {
+      match expr.markup_child() {
         Some(markup) => self.convert_inline_nodes(markup.children)
         None => []
       }
     FuncCall =>
-      match extract_func_callee_name(expr) {
+      match expr.func_callee_name() {
         Some("strong") => {
           let children = self.extract_first_content_inlines(expr)
           [self.make_node(Strong(children), start, end)]
@@ -1211,73 +1071,53 @@ fn Converter::convert_inline_hashed(
         Some("link") => {
           let mut url = ""
           let mut children : Array[TxtNode] = []
-          match find_func_args(expr) {
-            Some(args) => {
-              let pos = extract_positional_args(args)
-              if !pos.is_empty() {
-                match extract_str_literal(pos[0]) {
-                  Some(s) => url = s
-                  None => ()
-                }
-              }
-              let cbs = collect_content_blocks(args)
-              if !cbs.is_empty() {
-                match find_markup_child(cbs[0]) {
-                  Some(markup) =>
-                    children = self.convert_inline_nodes(markup.children)
-                  None => ()
-                }
-              } else if !pos.is_empty() && pos[0].node.kind() is Str {
-                // `#link("https://...")` without body: use inner string range if non-empty.
-                let str_node = pos[0]
-                if str_node.end - str_node.start >= 2 {
-                  children = [
-                    self.make_node(
-                      Str(value=url),
-                      str_node.start + 1,
-                      str_node.end - 1,
-                    ),
-                  ]
-                }
-              }
+          if expr.func_args() is Some(args) {
+            let pos = args.positional_args()
+            if pos is [first_arg, ..] && first_arg.str_literal() is Some(s) {
+              url = s
             }
-            None => ()
+            if args.content_blocks() is [first_cb, ..] &&
+              first_cb.markup_child() is Some(markup) {
+              children = self.convert_inline_nodes(markup.children)
+            } else if pos is [str_node, ..] &&
+              str_node.kind() is Str &&
+              str_node.end - str_node.start >= 2 {
+              // `#link("https://...")` without body: use inner string range if non-empty.
+              children = [
+                self.make_node(
+                  Str(value=url),
+                  str_node.start + 1,
+                  str_node.end - 1,
+                ),
+              ]
+            }
           }
           [self.make_node(Link(url~, title=None, children~), start, end)]
         }
         Some("image") => [self.convert_image_func(expr, start, end)]
         Some("raw") => {
-          let mut value = ""
-          match find_func_args(expr) {
-            Some(args) => {
-              let pos = extract_positional_args(args)
-              if !pos.is_empty() {
-                match extract_str_literal(pos[0]) {
-                  Some(s) => value = s
-                  None => ()
-                }
-              }
-            }
-            None => ()
+          let value = match expr.func_args() {
+            Some(args) if args.positional_args() is [first_arg, ..] =>
+              first_arg.str_literal().unwrap_or("")
+            _ => ""
           }
           [self.make_node(Code(value~), start, end)]
         }
         _ =>
           // Generic inline function call: recursively expose prose inside any ContentBlock arguments;
           // otherwise treat the expression as inline Code so rules don't false-positive on Typst code.
-          if has_content_block_recursive(expr) {
+          if expr.has_content_block() {
             let out : Array[TxtNode] = []
-            match find_func_args(expr) {
-              Some(args) => self.extract_inlines_from_expr(args, out)
-              None => ()
+            if expr.func_args() is Some(args) {
+              self.extract_inlines_from_expr(args, out)
             }
             out
           } else {
             [self.make_node(Code(value=self.slice(start, end)), start, end)]
           }
       }
-    Conditional | ForLoop | WhileLoop | Contextual =>
-      if has_content_block_recursive(expr) {
+    kind if kind.is_control_expr() =>
+      if expr.has_content_block() {
         let out : Array[TxtNode] = []
         self.extract_inlines_from_expr(expr, out)
         out
@@ -1290,28 +1130,21 @@ fn Converter::convert_inline_hashed(
 
 ///|
 fn Converter::convert_image_func(
-  self : Converter,
+  self : Self,
   expr : SpannedNode,
   start : Int32,
   end : Int32,
 ) -> TxtNode {
   let mut url = ""
   let mut alt : String? = None
-  match find_func_args(expr) {
-    Some(args) => {
-      let pos = extract_positional_args(args)
-      if !pos.is_empty() {
-        match extract_str_literal(pos[0]) {
-          Some(s) => url = s
-          None => ()
-        }
-      }
-      match extract_named_arg(args, "alt") {
-        Some(alt_node) => alt = extract_str_literal(alt_node)
-        None => ()
-      }
+  if expr.func_args() is Some(args) {
+    if args.positional_args() is [first_arg, ..] &&
+      first_arg.str_literal() is Some(s) {
+      url = s
     }
-    None => ()
+    if args.named_arg("alt") is Some(alt_node) {
+      alt = alt_node.str_literal()
+    }
   }
   self.make_node(Image(url~, alt~, title=None), start, end)
 }
@@ -1319,21 +1152,17 @@ fn Converter::convert_image_func(
 ///|
 /// Recursively extract inline TxtAST nodes from expressions containing ContentBlocks in source order.
 fn Converter::extract_inlines_from_expr(
-  self : Converter,
+  self : Self,
   expr : SpannedNode,
   out : Array[TxtNode],
 ) -> Unit {
-  match expr.node.kind() {
+  match expr.kind() {
     ContentBlock =>
-      match find_markup_child(expr) {
-        Some(markup) =>
-          for n in self.convert_inline_nodes(markup.children) {
-            out.push(n)
-          }
-        None => ()
+      if expr.markup_child() is Some(markup) {
+        out.append(self.convert_inline_nodes(markup.children))
       }
     FuncCall =>
-      match extract_func_callee_name(expr) {
+      match expr.func_callee_name() {
         Some("strong") => {
           let children = self.extract_first_content_inlines(expr)
           out.push(self.make_node(Strong(children), expr.start, expr.end))
@@ -1349,9 +1178,8 @@ fn Converter::extract_inlines_from_expr(
         Some("image") =>
           out.push(self.convert_image_func(expr, expr.start, expr.end))
         _ =>
-          match find_func_args(expr) {
-            Some(args) => self.extract_inlines_from_expr(args, out)
-            None => ()
+          if expr.func_args() is Some(args) {
+            self.extract_inlines_from_expr(args, out)
           }
       }
     LetBinding | SetRule | ShowRule | ModuleImport | ModuleInclude => ()
@@ -1364,31 +1192,19 @@ fn Converter::extract_inlines_from_expr(
 
 ///|
 fn Converter::extract_first_content_inlines(
-  self : Converter,
+  self : Self,
   func_call : SpannedNode,
 ) -> Array[TxtNode] {
-  match find_func_args(func_call) {
-    Some(args) => {
-      let cbs = collect_content_blocks(args)
-      if !cbs.is_empty() {
-        match find_markup_child(cbs[0]) {
-          Some(markup) => self.convert_inline_nodes(markup.children)
-          None => []
-        }
-      } else {
-        []
-      }
-    }
-    None => []
-  }
+  guard func_call.func_args() is Some(args) else { [] }
+  guard args.content_blocks() is [first_cb, ..] else { [] }
+  guard first_cb.markup_child() is Some(markup) else { [] }
+  self.convert_inline_nodes(markup.children)
 }
 
 ///|
 /// Parse a Typst source document into a textlint TxtAST `Document` node.
 pub fn parse_typst_to_txt_ast(source : String) -> TxtNode {
-  let root_cst = @syntax.parse(source)
-  let cursor : Ref[Int32] = { val: 0, }
-  let spanned_root = build_spanned_tree(root_cst, cursor)
+  let spanned_root = SpannedNode::from_cst(@syntax.parse(source))
   let conv = Converter::new(source)
   let children = conv.convert_markup_blocks(spanned_root.children)
   conv.make_node(Document(children), 0, source.length())

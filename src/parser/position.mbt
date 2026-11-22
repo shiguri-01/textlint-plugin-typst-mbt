@@ -7,12 +7,28 @@ pub(all) struct TxtPosition {
 }
 
 ///|
+pub impl ToJson for TxtPosition with fn to_json(self) {
+  { "line": self.line, "column": self.column }
+}
+
+///|
+pub extend TxtPosition with ToJson::{to_json}
+
+///|
 /// A start/end source location compatible with TxtAST.
 #derive(Eq, Debug)
 pub(all) struct TxtLocation {
   start : TxtPosition
   end : TxtPosition
 }
+
+///|
+pub impl ToJson for TxtLocation with fn to_json(self) {
+  { "start": self.start, "end": self.end }
+}
+
+///|
+pub extend TxtLocation with ToJson::{to_json}
 
 ///|
 /// Line start offset table in UTF-16 code units.
@@ -23,24 +39,21 @@ pub struct LineIndex {
 
 ///|
 /// Build a line index from source text using LF, CR, and CRLF boundaries.
-pub fn LineIndex::new(text : String) -> LineIndex {
+pub fn LineIndex::new(text : String) -> Self {
   let starts : Array[Int32] = [0]
   let len = text.length()
   let mut i = 0
   while i < len {
-    let c = text.code_unit_at(i).to_int()
-    if c == 10 {
-      starts.push(i + 1)
-      i += 1
-    } else if c == 13 {
-      if i + 1 < len && text.code_unit_at(i + 1).to_int() == 10 {
-        i += 2
-      } else {
+    match text.code_unit_at(i) {
+      '\n' => {
         i += 1
+        starts.push(i)
       }
-      starts.push(i)
-    } else {
-      i += 1
+      '\r' => {
+        i += if i + 1 < len && text.code_unit_at(i + 1) == '\n' { 2 } else { 1 }
+        starts.push(i)
+      }
+      _ => i += 1
     }
   }
   { starts, }
@@ -48,7 +61,7 @@ pub fn LineIndex::new(text : String) -> LineIndex {
 
 ///|
 /// Convert a 0-based UTF-16 code unit offset into a TxtPosition.
-pub fn LineIndex::position_of(self : LineIndex, offset : Int32) -> TxtPosition {
+pub fn LineIndex::position_of(self : Self, offset : Int32) -> TxtPosition {
   let mut lo = 0
   let mut hi = self.starts.length() - 1
   while lo < hi {
@@ -65,7 +78,7 @@ pub fn LineIndex::position_of(self : LineIndex, offset : Int32) -> TxtPosition {
 ///|
 /// Convert a UTF-16 offset range [start, end) into a TxtLocation.
 pub fn LineIndex::location_of(
-  self : LineIndex,
+  self : Self,
   start : Int32,
   end : Int32,
 ) -> TxtLocation {

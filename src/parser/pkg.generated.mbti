@@ -31,6 +31,8 @@ pub(all) struct TxtLocation {
   start : TxtPosition
   end : TxtPosition
 }
+pub fn TxtLocation::to_json(Self) -> @json.Json
+pub impl @json.ToJson for TxtLocation
 
 #derive(Eq, @debug.Debug)
 pub(all) struct TxtNode {
@@ -43,6 +45,7 @@ pub(all) struct TxtNode {
 pub fn TxtNode::to_js(Self) -> JsValue
 pub fn TxtNode::to_json(Self) -> @json.Json
 pub fn TxtNode::type_name(Self) -> String
+pub impl @json.ToJson for TxtNode
 
 #derive(Eq, @debug.Debug)
 pub(all) enum TxtNodeKind {
@@ -67,12 +70,15 @@ pub(all) enum TxtNodeKind {
   Link(url~ : String, title~ : String?, children~ : Array[TxtNode])
   Image(url~ : String, alt~ : String?, title~ : String?)
 }
+pub fn TxtNodeKind::type_name(Self) -> String
 
 #derive(Eq, @debug.Debug)
 pub(all) struct TxtPosition {
   line : Int32
   column : Int32
 }
+pub fn TxtPosition::to_json(Self) -> @json.Json
+pub impl @json.ToJson for TxtPosition
 
 // Type aliases
 

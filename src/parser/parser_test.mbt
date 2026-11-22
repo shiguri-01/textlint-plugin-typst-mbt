@@ -102,6 +102,25 @@ test "utf16 surrogate pair and crlf locations" {
 
 ///|
 test "json serialization output" {
+  let src = "Hello\n\n```rust\nlet x = 1\n```\n"
+  let doc = @textlint-plugin-typst-mbt.parse_typst_to_txt_ast(src)
+  guard doc.to_json()
+    is {
+      "type": "Document",
+      "children": [
+        {
+          "type": "Paragraph",
+          "children": [{ "type": "Str", "value": "Hello", .. }],
+          ..
+        },
+        { "type": "CodeBlock", "lang": "rust", "value": "let x = 1", .. },
+      ],
+      "range": [0, _],
+      "loc": { "start": { "line": 1, "column": 0, .. }, .. },
+      ..
+    } else {
+    fail("unexpected JSON structure")
+  }
   let json_str = @textlint-plugin-typst-mbt.parse_to_txt_ast_json("Hello")
   assert_true(json_str.contains("\"type\":\"Document\""))
   assert_true(json_str.contains("\"type\":\"Paragraph\""))

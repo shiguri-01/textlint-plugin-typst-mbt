@@ -135,19 +135,13 @@ extern "js" fn js_make_image_node(
   #| (url, alt, title, raw, rs, re, loc) => ({ type: "Image", url, alt, title, raw, range: [rs, re], loc })
 
 ///|
-fn opt_string_to_js(s : String?) -> JsValue {
-  match s {
-    Some(v) => js_string(v)
-    None => js_null()
-  }
-}
-
-///|
-fn opt_int_to_js(n : Int32?) -> JsValue {
-  match n {
-    Some(v) => js_int(v)
-    None => js_null()
-  }
+fn TxtLocation::to_js(self : Self) -> JsValue {
+  js_make_loc(
+    self.start.line,
+    self.start.column,
+    self.end.line,
+    self.end.column,
+  )
 }
 
 ///|
@@ -161,13 +155,8 @@ fn children_to_js(children : Array[TxtNode]) -> JsValue {
 
 ///|
 /// Convert a TxtNode tree directly into native JS objects matching `@textlint/ast-node-types`.
-pub fn TxtNode::to_js(self : TxtNode) -> JsValue {
-  let loc = js_make_loc(
-    self.loc.start.line,
-    self.loc.start.column,
-    self.loc.end.line,
-    self.loc.end.column,
-  )
+pub fn TxtNode::to_js(self : Self) -> JsValue {
+  let loc = self.loc.to_js()
   match self.kind {
     Document(children)
     | Paragraph(children)
@@ -198,7 +187,7 @@ pub fn TxtNode::to_js(self : TxtNode) -> JsValue {
     List(ordered~, start~, spread~, children~) =>
       js_make_list_node(
         ordered,
-        opt_int_to_js(start),
+        start.map_or(js_null(), js_int),
         spread,
         children_to_js(children),
         self.raw,
@@ -218,7 +207,7 @@ pub fn TxtNode::to_js(self : TxtNode) -> JsValue {
     CodeBlock(value~, lang~) =>
       js_make_code_block_node(
         value,
-        opt_string_to_js(lang),
+        lang.map_or(js_null(), js_string),
         self.raw,
         self.range_start,
         self.range_end,
@@ -244,7 +233,7 @@ pub fn TxtNode::to_js(self : TxtNode) -> JsValue {
     Link(url~, title~, children~) =>
       js_make_link_node(
         url,
-        opt_string_to_js(title),
+        title.map_or(js_null(), js_string),
         children_to_js(children),
         self.raw,
         self.range_start,
@@ -254,8 +243,8 @@ pub fn TxtNode::to_js(self : TxtNode) -> JsValue {
     Image(url~, alt~, title~) =>
       js_make_image_node(
         url,
-        opt_string_to_js(alt),
-        opt_string_to_js(title),
+        alt.map_or(js_null(), js_string),
+        title.map_or(js_null(), js_string),
         self.raw,
         self.range_start,
         self.range_end,

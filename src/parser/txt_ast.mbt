@@ -30,20 +30,9 @@ pub(all) enum TxtNodeKind {
 }
 
 ///|
-/// A textlint TxtAST node with exact UTF-16 range, location, and raw slice.
-#derive(Eq, Debug)
-pub(all) struct TxtNode {
-  kind : TxtNodeKind
-  raw : String
-  range_start : Int32
-  range_end : Int32
-  loc : TxtLocation
-}
-
-///|
-/// Return the TxtAST node type name.
-pub fn TxtNode::type_name(self : TxtNode) -> String {
-  match self.kind {
+/// Return the TxtAST node type name for this kind.
+pub fn TxtNodeKind::type_name(self : Self) -> String {
+  match self {
     Document(_) => "Document"
     Paragraph(_) => "Paragraph"
     Header(..) => "Header"
@@ -68,35 +57,34 @@ pub fn TxtNode::type_name(self : TxtNode) -> String {
 }
 
 ///|
-fn TxtPosition::to_json_value(self : TxtPosition) -> Json {
-  let obj : Map[String, Json] = Map([])
-  obj["line"] = Json::number(self.line.to_double())
-  obj["column"] = Json::number(self.column.to_double())
-  Json::object(obj)
+/// A textlint TxtAST node with exact UTF-16 range, location, and raw slice.
+#derive(Eq, Debug)
+pub(all) struct TxtNode {
+  kind : TxtNodeKind
+  raw : String
+  range_start : Int32
+  range_end : Int32
+  loc : TxtLocation
 }
 
 ///|
-fn TxtLocation::to_json_value(self : TxtLocation) -> Json {
-  let obj : Map[String, Json] = Map([])
-  obj["start"] = self.start.to_json_value()
-  obj["end"] = self.end.to_json_value()
-  Json::object(obj)
+/// Return the TxtAST node type name.
+pub fn TxtNode::type_name(self : Self) -> String {
+  self.kind.type_name()
 }
 
 ///|
-fn children_to_json(children : Array[TxtNode]) -> Json {
-  let arr : Array[Json] = Array(capacity=children.length())
-  for child in children {
-    arr.push(child.to_json())
+fn[T : ToJson] opt_to_json(opt : T?) -> Json {
+  match opt {
+    Some(v) => ToJson::to_json(v)
+    None => Json::null()
   }
-  Json::array(arr)
 }
 
 ///|
 /// Serialize this TxtNode tree into a Json value matching `@textlint/ast-node-types`.
-pub fn TxtNode::to_json(self : TxtNode) -> Json {
-  let obj : Map[String, Json] = Map([])
-  obj["type"] = Json::string(self.type_name())
+pub impl ToJson for TxtNode with fn to_json(self) {
+  let obj : Map[String, Json] = { "type": ToJson::to_json(self.type_name()) }
   match self.kind {
     Document(children)
     | Paragraph(children)
@@ -106,59 +94,44 @@ pub fn TxtNode::to_json(self : TxtNode) -> Json {
     | TableCell(children)
     | Emphasis(children)
     | Strong(children)
-    | Delete(children) => obj["children"] = children_to_json(children)
+    | Delete(children) => obj["children"] = ToJson::to_json(children)
     Header(depth~, children~) => {
-      obj["depth"] = Json::number(depth.to_double())
-      obj["children"] = children_to_json(children)
+      obj["depth"] = ToJson::to_json(depth)
+      obj["children"] = ToJson::to_json(children)
     }
     List(ordered~, start~, spread~, children~) => {
-      obj["ordered"] = Json::boolean(ordered)
-      match start {
-        Some(n) => obj["start"] = Json::number(n.to_double())
-        None => obj["start"] = Json::null()
-      }
-      obj["spread"] = Json::boolean(spread)
-      obj["children"] = children_to_json(children)
+      obj["ordered"] = ToJson::to_json(ordered)
+      obj["start"] = opt_to_json(start)
+      obj["spread"] = ToJson::to_json(spread)
+      obj["children"] = ToJson::to_json(children)
     }
     ListItem(spread~, children~) => {
-      obj["spread"] = Json::boolean(spread)
-      obj["children"] = children_to_json(children)
+      obj["spread"] = ToJson::to_json(spread)
+      obj["children"] = ToJson::to_json(children)
     }
     CodeBlock(value~, lang~) => {
-      obj["value"] = Json::string(value)
-      match lang {
-        Some(l) => obj["lang"] = Json::string(l)
-        None => obj["lang"] = Json::null()
-      }
+      obj["value"] = ToJson::to_json(value)
+      obj["lang"] = opt_to_json(lang)
     }
     HorizontalRule | Break => ()
     Comment(value~) | Str(value~) | Code(value~) =>
-      obj["value"] = Json::string(value)
+      obj["value"] = ToJson::to_json(value)
     Link(url~, title~, children~) => {
-      obj["url"] = Json::string(url)
-      match title {
-        Some(t) => obj["title"] = Json::string(t)
-        None => obj["title"] = Json::null()
-      }
-      obj["children"] = children_to_json(children)
+      obj["url"] = ToJson::to_json(url)
+      obj["title"] = opt_to_json(title)
+      obj["children"] = ToJson::to_json(children)
     }
     Image(url~, alt~, title~) => {
-      obj["url"] = Json::string(url)
-      match alt {
-        Some(a) => obj["alt"] = Json::string(a)
-        None => obj["alt"] = Json::null()
-      }
-      match title {
-        Some(t) => obj["title"] = Json::string(t)
-        None => obj["title"] = Json::null()
-      }
+      obj["url"] = ToJson::to_json(url)
+      obj["alt"] = opt_to_json(alt)
+      obj["title"] = opt_to_json(title)
     }
   }
-  obj["raw"] = Json::string(self.raw)
-  obj["range"] = Json::array([
-    Json::number(self.range_start.to_double()),
-    Json::number(self.range_end.to_double()),
-  ])
-  obj["loc"] = self.loc.to_json_value()
+  obj["raw"] = ToJson::to_json(self.raw)
+  obj["range"] = ToJson::to_json([self.range_start, self.range_end])
+  obj["loc"] = self.loc.to_json()
   Json::object(obj)
 }
+
+///|
+pub extend TxtNode with ToJson::{to_json}
