@@ -1,0 +1,14 @@
+import {
+  "moonbitlang/typst/syntax",
+  "moonbitlang/typst/syntax/ast",
+}
+
+options(
+  link: {
+    "js": {
+      "exports": [ "parse_to_txt_ast", "parse_to_txt_ast_json" ],
+      "format": "esm",
+    },
+  },
+  targets: { "js_ast.mbt": [ "js" ] },
+)

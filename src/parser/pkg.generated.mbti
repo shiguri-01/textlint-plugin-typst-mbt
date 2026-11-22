@@ -1,0 +1,79 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "shiguri-01/textlint-plugin-typst-mbt"
+
+import {
+  "moonbitlang/core/debug",
+  "moonbitlang/core/json",
+}
+
+// Values
+pub fn parse_to_txt_ast(String) -> JsValue
+
+pub fn parse_to_txt_ast_json(String) -> String
+
+pub fn parse_typst_to_txt_ast(String) -> TxtNode
+
+// Errors
+
+// Types and methods
+#external
+pub type JsValue
+
+pub struct LineIndex {
+  // private fields
+}
+pub fn LineIndex::location_of(Self, Int32, Int32) -> TxtLocation
+pub fn LineIndex::new(String) -> Self
+pub fn LineIndex::position_of(Self, Int32) -> TxtPosition
+
+#derive(Eq, @debug.Debug)
+pub(all) struct TxtLocation {
+  start : TxtPosition
+  end : TxtPosition
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) struct TxtNode {
+  kind : TxtNodeKind
+  raw : String
+  range_start : Int32
+  range_end : Int32
+  loc : TxtLocation
+}
+pub fn TxtNode::to_js(Self) -> JsValue
+pub fn TxtNode::to_json(Self) -> @json.Json
+pub fn TxtNode::type_name(Self) -> String
+
+#derive(Eq, @debug.Debug)
+pub(all) enum TxtNodeKind {
+  Document(Array[TxtNode])
+  Paragraph(Array[TxtNode])
+  Header(depth~ : Int32, children~ : Array[TxtNode])
+  BlockQuote(Array[TxtNode])
+  List(ordered~ : Bool, start~ : Int32?, spread~ : Bool, children~ : Array[TxtNode])
+  ListItem(spread~ : Bool, children~ : Array[TxtNode])
+  Table(Array[TxtNode])
+  TableRow(Array[TxtNode])
+  TableCell(Array[TxtNode])
+  CodeBlock(value~ : String, lang~ : String?)
+  HorizontalRule
+  Comment(value~ : String)
+  Str(value~ : String)
+  Break
+  Emphasis(Array[TxtNode])
+  Strong(Array[TxtNode])
+  Delete(Array[TxtNode])
+  Code(value~ : String)
+  Link(url~ : String, title~ : String?, children~ : Array[TxtNode])
+  Image(url~ : String, alt~ : String?, title~ : String?)
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) struct TxtPosition {
+  line : Int32
+  column : Int32
+}
+
+// Type aliases
+
+// Traits

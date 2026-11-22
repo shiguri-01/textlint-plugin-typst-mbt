@@ -1,5 +1,0 @@
-// import {
-//   "shiguri-01/textlint-plugin-typst-mbt" @lib,
-// }
-
-pkgtype(kind: "executable")
