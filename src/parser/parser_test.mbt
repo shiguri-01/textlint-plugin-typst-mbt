@@ -207,17 +207,17 @@ test "raw function form block and inline" {
 ///|
 test "footnote splits host paragraph into separate blocks" {
   let src =
-    #|導入です。#footnote[短い補足。]続きです。
+    #|導入です。#footnote(numbering: it => [*#it*])[短い補足。]#footnote(body: [名前付き。])続きです。
     #|
     #|- 項目。#footnote(numbering: "a")[補足1。
     #|
     #|補足2。]後続。
   let doc = @textlint-plugin-typst-mbt.parse_typst_to_txt_ast(src)
-  guard doc.kind is Document([p1, p2, p3, list_node]) else {
-    fail("expected 3 Paragraphs and 1 List")
+  guard doc.kind is Document([p1, p2, p3, p4, list_node]) else {
+    fail("expected 4 Paragraphs and 1 List")
   }
-  assert_eq([p1.raw, p2.raw, p3.raw], [
-    "導入です。", "短い補足。", "続きです。",
+  assert_eq([p1.raw, p2.raw, p3.raw, p4.raw], [
+    "導入です。", "短い補足。", "名前付き。", "続きです。",
   ])
   guard list_node.kind is List(children=[list_item], ..) else {
     fail("expected single ListItem")
@@ -232,9 +232,20 @@ test "footnote splits host paragraph into separate blocks" {
 
 ///|
 test "footnote label reference stays inline as code" {
-  let src = "前掲の脚注#footnote(<fn1>)を参照してください。"
+  let src =
+    #|前掲の脚注#footnote(<fn1>)を参照してください。
+    #|
+    #|#footnote(numbering: it => [*#it*], <fn1>)
   let doc = @textlint-plugin-typst-mbt.parse_typst_to_txt_ast(src)
-  guard doc.kind is Document([para]) else { fail("expected single Paragraph") }
-  guard para.kind is Paragraph(children) else { fail("expected Paragraph") }
-  assert_eq(children.map(fn(n) { n.type_name() }), ["Str", "Code", "Str"])
+  guard doc.kind is Document([inline_para, standalone_para]) else {
+    fail("expected 2 Paragraphs")
+  }
+  guard inline_para.kind is Paragraph(inline_children) else {
+    fail("expected Paragraph")
+  }
+  assert_eq(inline_children.map(fn(n) { n.type_name() }), ["Str", "Code", "Str"])
+  guard standalone_para.kind is Paragraph(standalone_children) else {
+    fail("expected Paragraph")
+  }
+  assert_eq(standalone_children.map(fn(n) { n.type_name() }), ["Code"])
 }

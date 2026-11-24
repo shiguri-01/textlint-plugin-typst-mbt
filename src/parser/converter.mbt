@@ -564,13 +564,20 @@ fn Converter::convert_markup_blocks(
             )
           }
           i += 1
-        } else if ek is FuncCall &&
-          expr.func_callee_name() is Some("footnote") &&
-          !expr.footnote_body_args().is_empty() {
-          // Footnote prose is independent of the host sentence; emit its body as
-          // separate block(s) so host and footnote Paragraphs keep contiguous ranges.
-          flush_paragraph()
-          self.extract_blocks_from_expr(expr, blocks)
+        } else if ek is FuncCall && expr.func_callee_name() is Some("footnote") {
+          let body_args = expr.footnote_body_args()
+          if body_args.is_empty() {
+            inline_buf.push(item)
+          } else {
+            // Footnote prose is independent of the host sentence; emit its body as
+            // separate block(s) so host and footnote Paragraphs keep contiguous ranges.
+            // Mid-sentence footnotes intentionally split the surrounding Paragraph
+            // to satisfy TxtAST's single contiguous range invariant.
+            flush_paragraph()
+            for body_arg in body_args {
+              self.extract_blocks_from_expr(body_arg, blocks)
+            }
+          }
           i += 1
         } else if ek is FuncCall && is_only_whitespace_items(inline_buf) {
           match expr.func_callee_name() {

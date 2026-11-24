@@ -393,6 +393,19 @@ describe("textlint integration via TextlintKernel", () => {
       column: 20,
     });
 
+    // Both a multi-line footnote sentence and the following body sentence exceed the limit
+    const resBoth = await lint(
+      [
+        "導入です。#footnote[",
+        "  脚注の補足がとても長く、追加の説明や背景事情まで含んでいて、なかなか終わりません。",
+        "]その後の本文がとても長く、追加の説明や背景事情まで含んでいて、なかなか終わりません。",
+      ].join("\n"),
+    );
+    expect(resBoth.messages.map((m) => [m.line, m.column])).toEqual([
+      [2, 3],
+      [3, 2],
+    ]);
+
     // Label-reference footnote stays inline without blinding subsequent sentences
     const resLabel = await lint(
       "前掲の脚注#footnote(<fn1>)を参照してください。その後の本文がとても長く、追加の説明や背景事情まで含んでいて、なかなか終わりません。",
