@@ -209,8 +209,6 @@ fn SpannedNode::named_arg(self : Self, name : String) -> Self? {
 }
 
 ///|
-/// Return footnote body argument expressions that contain a ContentBlock,
-/// excluding non-body named arguments such as `numbering` and label references.
 fn SpannedNode::footnote_body_args(self : Self) -> Array[Self] {
   guard self.func_args() is Some(args) else { [] }
   let out : Array[SpannedNode] = []
@@ -569,10 +567,6 @@ fn Converter::convert_markup_blocks(
           if body_args.is_empty() {
             inline_buf.push(item)
           } else {
-            // Footnote prose is independent of the host sentence; emit its body as
-            // separate block(s) so host and footnote Paragraphs keep contiguous ranges.
-            // Mid-sentence footnotes intentionally split the surrounding Paragraph
-            // to satisfy TxtAST's single contiguous range invariant.
             flush_paragraph()
             for body_arg in body_args {
               self.extract_blocks_from_expr(body_arg, blocks)
