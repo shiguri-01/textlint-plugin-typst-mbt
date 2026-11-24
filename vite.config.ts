@@ -1,6 +1,9 @@
 import { defineConfig } from "vite-plus";
 
 export default defineConfig({
+  staged: {
+    "*": () => "vp run check",
+  },
   fmt: {
     ignorePatterns: ["_build/**", "target/**", ".mooncakes/**", "dist/**"],
   },

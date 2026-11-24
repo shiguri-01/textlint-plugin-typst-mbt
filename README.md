@@ -93,6 +93,8 @@ vp run build     # Build the plugin
 vp run verify    # Run the full CI checks locally
 ```
 
+Run `vp hooks enable` once per clone to enable pre-commit checks. If you previously set `core.hooksPath` to `.githooks`, clear it first with `git config --local --unset core.hooksPath`.
+
 ## Acknowledgments
 
 This plugin uses [moonbitlang/typst.mbt](https://github.com/moonbitlang/typst.mbt) for parsing Typst syntax and was inspired by the official [textlint/textlint-plugin-typst](https://github.com/textlint/textlint-plugin-typst).
