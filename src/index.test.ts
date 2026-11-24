@@ -1,6 +1,7 @@
 import { test as assertTxtAST, isTxtAST } from "@textlint/ast-tester";
 import { TextlintKernel } from "@textlint/kernel";
 import type { TextlintRuleModule } from "@textlint/types";
+import { SentenceSplitterSyntax, splitAST } from "sentence-splitter";
 import filterComments from "textlint-filter-rule-comments";
 import ruleNoTodo from "textlint-rule-no-todo";
 import { describe, expect, it } from "vite-plus/test";
@@ -145,6 +146,20 @@ describe("parse (TxtAST conformance via @textlint/ast-tester)", () => {
     [
       "raw() function call in block and inline forms",
       '#raw("const a = 1;", lang: "ts", block: true)\n\nInline #raw("a + b") code.',
+    ],
+    [
+      "footnotes in paragraphs, lists, and quotes",
+      [
+        "導入です。#footnote[短い補足。]その後の本文です。",
+        "",
+        "これは短い文です。#footnote[脚注の補足です。\n\n脚注の2段落目です。]",
+        "",
+        '前掲の脚注#footnote(<fn1>)と#footnote(numbering: "a")[記号付き補足。]を参照。',
+        "",
+        "- 項目です。#footnote[リスト内補足。]続きです。",
+        "",
+        "#quote[引用です。#footnote[引用内補足。]続きです。]",
+      ].join("\n"),
     ],
   ];
 
@@ -323,5 +338,83 @@ describe("textlint integration via TextlintKernel", () => {
       [13, 5],
       [15, 3],
     ]);
+  });
+
+  it("preserves sentences inside and after footnotes for sentence-splitter", async () => {
+    const sentenceLengthRule =
+      (max: number): TextlintRuleModule =>
+      (context) => {
+        const { Syntax, RuleError, report } = context;
+        return {
+          [Syntax.Paragraph](node) {
+            const split = splitAST(node as unknown as Parameters<typeof splitAST>[0]);
+            for (const child of split.children) {
+              if (child.type !== SentenceSplitterSyntax.Sentence) continue;
+              if (child.raw.length > max) {
+                report(
+                  node,
+                  new RuleError(`Sentence length ${child.raw.length} exceeds ${max}`, {
+                    index: child.range[0] - node.range[0],
+                  }),
+                );
+              }
+            }
+          },
+        };
+      };
+
+    const lint = (source: string) =>
+      kernel.lintText(source, {
+        ext: ".typ",
+        filePath: "footnote.typ",
+        plugins: [{ pluginId: "typst", plugin }],
+        rules: [{ ruleId: "sentence-length", rule: sentenceLengthRule(40) }],
+      });
+
+    // Long body sentence after a short footnote
+    const resAfter = await lint(
+      "導入です。#footnote[短い補足。]その後の本文がとても長く、追加の説明や背景事情まで含んでいて、なかなか終わりません。",
+    );
+    expect(resAfter.messages).toHaveLength(1);
+    expect(resAfter.messages[0]).toMatchObject({
+      ruleId: "sentence-length",
+      line: 1,
+      column: 22,
+    });
+
+    // Long sentence inside a footnote
+    const resInside = await lint(
+      "これは短い文です。#footnote[脚注の補足がとても長く、追加の説明や背景事情まで含んでいて、なかなか終わりません。]",
+    );
+    expect(resInside.messages).toHaveLength(1);
+    expect(resInside.messages[0]).toMatchObject({
+      ruleId: "sentence-length",
+      line: 1,
+      column: 20,
+    });
+
+    // Both a multi-line footnote sentence and the following body sentence exceed the limit
+    const resBoth = await lint(
+      [
+        "導入です。#footnote[",
+        "  脚注の補足がとても長く、追加の説明や背景事情まで含んでいて、なかなか終わりません。",
+        "]その後の本文がとても長く、追加の説明や背景事情まで含んでいて、なかなか終わりません。",
+      ].join("\n"),
+    );
+    expect(resBoth.messages.map((m) => [m.line, m.column])).toEqual([
+      [2, 3],
+      [3, 2],
+    ]);
+
+    // Label-reference footnote stays inline without blinding subsequent sentences
+    const resLabel = await lint(
+      "前掲の脚注#footnote(<fn1>)を参照してください。その後の本文がとても長く、追加の説明や背景事情まで含んでいて、なかなか終わりません。",
+    );
+    expect(resLabel.messages).toHaveLength(1);
+    expect(resLabel.messages[0]).toMatchObject({
+      ruleId: "sentence-length",
+      line: 1,
+      column: 32,
+    });
   });
 });

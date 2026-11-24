@@ -179,29 +179,50 @@ fn SpannedNode::bool_literal(self : Self) -> Bool? {
 }
 
 ///|
-fn SpannedNode::named_arg(self : Self, name : String) -> Self? {
-  for child in self.children {
-    if child.kind() is Named {
-      let mut key_matches = false
-      let mut last_expr : SpannedNode? = None
-      for nc in child.children {
-        let k = nc.kind()
-        if !key_matches && k is Ident {
-          if nc.node.leaf_text() == name {
-            key_matches = true
-          } else {
-            break
-          }
-        } else if key_matches && !k.is_trivia() && !(k is Colon) {
-          last_expr = Some(nc)
-        }
-      }
-      if key_matches {
-        return last_expr
-      }
+fn SpannedNode::named_entry(self : Self) -> (String, Self)? {
+  guard self.kind() is Named else { None }
+  let mut key : String? = None
+  let mut val : SpannedNode? = None
+  for nc in self.children {
+    let k = nc.kind()
+    if key is None && k is Ident {
+      key = Some(nc.node.leaf_text())
+    } else if key is Some(_) && !k.is_trivia() && !(k is Colon) {
+      val = Some(nc)
     }
   }
-  None
+  match (key, val) {
+    (Some(k), Some(v)) => Some((k, v))
+    _ => None
+  }
+}
+
+///|
+fn SpannedNode::named_arg(self : Self, name : String) -> Self? {
+  for child in self.children {
+    if child.named_entry() is Some((k, v)) && k == name {
+      break Some(v)
+    }
+  } nobreak {
+    None
+  }
+}
+
+///|
+fn SpannedNode::footnote_body_args(self : Self) -> Array[Self] {
+  guard self.func_args() is Some(args) else { [] }
+  let out : Array[SpannedNode] = []
+  for child in args.children {
+    if child.kind().is_positional_arg() {
+      if child.has_content_block() {
+        out.push(child)
+      }
+    } else if child.named_entry() is Some(("body", val)) &&
+      val.has_content_block() {
+      out.push(val)
+    }
+  }
+  out
 }
 
 ///|
@@ -388,7 +409,6 @@ fn is_inline_only_func_name(name : String) -> Bool {
   | "link"
   | "image"
   | "text"
-  | "footnote"
   | "cite"
   | "ref"
   | "h"
@@ -540,6 +560,17 @@ fn Converter::convert_markup_blocks(
                 end,
               ),
             )
+          }
+          i += 1
+        } else if ek is FuncCall && expr.func_callee_name() is Some("footnote") {
+          let body_args = expr.footnote_body_args()
+          if body_args.is_empty() {
+            inline_buf.push(item)
+          } else {
+            flush_paragraph()
+            for body_arg in body_args {
+              self.extract_blocks_from_expr(body_arg, blocks)
+            }
           }
           i += 1
         } else if ek is FuncCall && is_only_whitespace_items(inline_buf) {
@@ -843,6 +874,10 @@ fn Converter::extract_blocks_from_expr(
           let img = self.convert_image_func(expr, expr.start, expr.end)
           out.push(self.make_node(Paragraph([img]), expr.start, expr.end))
         }
+        Some("footnote") =>
+          for body_arg in expr.footnote_body_args() {
+            self.extract_blocks_from_expr(body_arg, out)
+          }
         _ =>
           if expr.func_args() is Some(args) {
             self.extract_blocks_from_expr(args, out)
@@ -1103,6 +1138,18 @@ fn Converter::convert_inline_hashed(
           }
           [self.make_node(Code(value~), start, end)]
         }
+        Some("footnote") => {
+          let body_args = expr.footnote_body_args()
+          if body_args.is_empty() {
+            [self.make_node(Code(value=self.slice(start, end)), start, end)]
+          } else {
+            let out : Array[TxtNode] = []
+            for body_arg in body_args {
+              self.extract_inlines_from_expr(body_arg, out)
+            }
+            out
+          }
+        }
         _ =>
           // Generic inline function call: recursively expose prose inside any ContentBlock arguments;
           // otherwise treat the expression as inline Code so rules don't false-positive on Typst code.
@@ -1177,6 +1224,10 @@ fn Converter::extract_inlines_from_expr(
         }
         Some("image") =>
           out.push(self.convert_image_func(expr, expr.start, expr.end))
+        Some("footnote") =>
+          for body_arg in expr.footnote_body_args() {
+            self.extract_inlines_from_expr(body_arg, out)
+          }
         _ =>
           if expr.func_args() is Some(args) {
             self.extract_inlines_from_expr(args, out)
