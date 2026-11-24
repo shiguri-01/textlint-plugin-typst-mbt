@@ -2,6 +2,9 @@
 
 A [textlint](https://textlint.github.io/) plugin for [Typst](https://typst.app/) documents.
 
+> [!WARNING]
+> This is an experimental project. AST mappings and APIs may change without notice.
+
 - Lints `.typ` files, including prose inside tables, figures, footnotes, control flow, and custom macros.
 - Ignores code blocks, inline code, math equations, labels, and Typst statements (`#let`, `#set`, `#show`, `#import`, `#include`).
 - Supports `textlint --fix`, including multibyte characters and emoji.
@@ -88,6 +91,10 @@ vp run test:mbt  # Run MoonBit unit tests
 vp run test      # Run textlint integration tests
 vp check         # Format, lint, and type-check
 ```
+
+## Acknowledgments
+
+This plugin uses [moonbitlang/typst.mbt](https://github.com/moonbitlang/typst.mbt) for parsing Typst syntax and was inspired by the official [textlint/textlint-plugin-typst](https://github.com/textlint/textlint-plugin-typst).
 
 ## License
 
