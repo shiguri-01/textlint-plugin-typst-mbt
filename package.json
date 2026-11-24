@@ -1,11 +1,12 @@
 {
-  "name": "textlint-plugin-typst-mbt",
+  "name": "@shiguri/textlint-plugin-typst",
   "version": "0.1.0",
   "description": "textlint plugin for Typst powered by MoonBit and moonbitlang/typst",
-  "license": "Apache-2.0",
-  "author": "",
+  "license": "MIT",
+  "author": "shiguri",
   "files": [
-    "dist"
+    "dist",
+    "THIRD_PARTY_LICENSES"
   ],
   "type": "module",
   "main": "./dist/index.cjs",

@@ -1,5 +1,5 @@
 import type { TxtDocumentNode } from "@textlint/ast-node-types";
-import { parse_to_txt_ast } from "../_build/js/release/build/textlint-plugin-typst-mbt.js";
+import { parse_to_txt_ast } from "../_build/js/release/build/textlint-plugin-typst.js";
 
 /**
  * Parse Typst source text directly into a textlint TxtAST `Document` node

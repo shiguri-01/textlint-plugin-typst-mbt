@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "shiguri-01/textlint-plugin-typst-mbt"
+package "shiguri-01/textlint-plugin-typst"
 
 import {
   "moonbitlang/core/debug",

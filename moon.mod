@@ -9,15 +9,15 @@
 //   "moonbitlang/x@0.4.6",
 // }
 
-name = "shiguri-01/textlint-plugin-typst-mbt"
+name = "shiguri-01/textlint-plugin-typst"
 
 version = "0.1.0"
 
-readme = "README.mbt.md"
+readme = "README.md"
 
 repository = ""
 
-license = "Apache-2.0"
+license = "MIT"
 
 keywords = [ ]
 
