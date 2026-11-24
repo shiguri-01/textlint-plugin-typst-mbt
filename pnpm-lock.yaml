@@ -29,6 +29,9 @@ importers:
       '@textlint/types':
         specifier: ^16.1.2
         version: 16.1.2
+      sentence-splitter:
+        specifier: ^5.1.0
+        version: 5.1.0
       textlint:
         specifier: ^16.1.2
         version: 16.1.2
@@ -1038,6 +1041,9 @@ packages:
     resolution: {integrity: sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw==}
     engines: {node: '>=0.10.0'}
 
+  sentence-splitter@5.1.0:
+    resolution: {integrity: sha512-Zt4F1K7KF3QQQOVgdJ0Of6WYGI9t3aSiGRI6/DpXj1FXvL5wiOobhRbYceDZnNmnuYWfwd4l+wfyLB+nUax5ow==}
+
   sirv@3.0.2:
     resolution: {integrity: sha512-2wcC/oGxHis/BoHkkPwldgiPSYcpZK3JU28WoMVv55yHJgcZ8rlXvuG9iZggz+sU1d4bRgIGASwyWqjxu3FM0g==}
     engines: {node: '>=18'}
@@ -1940,6 +1946,10 @@ snapshots:
   react-is@17.0.2: {}
 
   require-from-string@2.0.2: {}
+
+  sentence-splitter@5.1.0:
+    dependencies:
+      '@textlint/ast-node-types': 15.8.0
 
   sirv@3.0.2:
     dependencies:
