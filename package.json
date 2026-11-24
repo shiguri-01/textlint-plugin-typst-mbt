@@ -28,9 +28,12 @@
     "build:mbt": "moon build --target js --release",
     "build:wasm": "moon build --target wasm-gc --release",
     "build": "vp run build:mbt && vp pack",
+    "fmt": "moon fmt && vp fmt",
+    "check": "moon fmt --check && moon check --target js --no-mbti && vp run build:mbt && vp check",
     "test:mbt": "moon test --target js",
-    "test": "vp run build:mbt && vp test run",
-    "check": "vp check"
+    "test:js": "vp run build:mbt && vp test run",
+    "test": "vp run test:mbt && vp run test:js",
+    "verify": "vp run check && vp pack && vp run test:mbt && vp test run"
   },
   "devDependencies": {
     "@textlint/ast-node-types": "^16.1.2",

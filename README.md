@@ -86,10 +86,11 @@ Prerequisites: [MoonBit](https://www.moonbitlang.com/download/) (`moon`) and [Vi
 
 ```bash
 vp install       # Install dependencies
-vp run build     # Build MoonBit output and bundle ESM/CJS + types
-vp run test:mbt  # Run MoonBit unit tests
-vp run test      # Run textlint integration tests
-vp check         # Format, lint, and type-check
+vp run fmt       # Format files
+vp run check     # Check formatting, lint, and types
+vp run test      # Run all tests (or use test:mbt / test:js)
+vp run build     # Build the plugin
+vp run verify    # Run the full CI checks locally
 ```
 
 ## Acknowledgments
