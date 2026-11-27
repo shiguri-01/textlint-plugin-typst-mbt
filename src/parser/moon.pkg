@@ -3,12 +3,9 @@ import {
   "moonbitlang/typst/syntax/ast",
 }
 
+pkgtype(kind: "foreign_library")
+
 options(
-  link: {
-    "js": {
-      "exports": [ "parse_to_txt_ast", "parse_to_txt_ast_json" ],
-      "format": "esm",
-    },
-  },
+  link: { "js": { "format": "esm" } },
   targets: { "js_ast.mbt": [ "js" ] },
 )

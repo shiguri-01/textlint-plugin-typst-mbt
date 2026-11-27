@@ -255,6 +255,7 @@ pub fn TxtNode::to_js(self : Self) -> JsValue {
 
 ///|
 /// Parse Typst source text directly into a native JS TxtAST object (no JSON serialization).
+#export_name("parse_to_txt_ast")
 pub fn parse_to_txt_ast(text : String) -> JsValue {
   parse_typst_to_txt_ast(text).to_js()
 }
